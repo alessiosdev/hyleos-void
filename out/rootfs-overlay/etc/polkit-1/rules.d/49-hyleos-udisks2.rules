@@ -1,0 +1,13 @@
+polkit.addRule(function(action, subject) {
+    if ((action.id.indexOf("org.freedesktop.udisks2.") == 0 ||
+         action.id.indexOf("org.freedespatial.udisks2.filesystem-mount") == 0 ||
+         action.id.indexOf("org.freedesktop.udisks2.filesystem-mount-system") == 0 ||
+         action.id.indexOf("org.freedesktop.udisks2.eject-media") == 0 ||
+         action.id.indexOf("org.freedesktop.udisks2.power-off-drive") == 0 ||
+         action.id.indexOf("org.freedesktop.udisks2.encrypt-device") == 0 ||
+         action.id.indexOf("org.freedesktop.udisks2.loop-setup") == 0) &&
+        subject.active == true && subject.local == true &&
+        subject.isInGroup("wheel")) {
+            return polkit.Result.YES;
+    }
+});

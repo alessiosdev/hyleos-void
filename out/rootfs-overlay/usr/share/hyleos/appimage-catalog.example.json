@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "_commento": "Esempi dimostrativi, NON installabili: sha256 e download_url/icon_url sono vuoti. Il backend rifiuta hash vuoti e URL assenti; inserire solo URL verificati e hash SHA256 reali prima di usare queste voci.",
+  "apps": [
+    {
+      "id": "obsidian",
+      "name": "Obsidian",
+      "summary": "Note personali collegate in una rete di conoscenze",
+      "category": "Ufficio",
+      "version": "",
+      "download_url": "",
+      "sha256": "",
+      "icon_url": ""
+    },
+    {
+      "id": "balenaetcher",
+      "name": "BalenaEtcher",
+      "summary": "Masterizzazione sicura di immagini su chiavette USB",
+      "category": "Sistema",
+      "version": "",
+      "download_url": "",
+      "sha256": "",
+      "icon_url": ""
+    },
+    {
+      "id": "ide-community",
+      "name": "IDE Community",
+      "summary": "Ambiente di sviluppo integrato per Java e Kotlin",
+      "category": "Sviluppo",
+      "version": "",
+      "download_url": "",
+      "sha256": "",
+      "icon_url": ""
+    }
+  ]
+}

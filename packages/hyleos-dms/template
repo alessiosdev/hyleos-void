@@ -1,0 +1,35 @@
+# Ricetta xbps-src — hyleos-dms
+#
+# DMS (DankMaterialShell) è un binario Go statico + l'albero QML in
+# /etc/xdg/quickshell/hyleos-dms. La versione del pacchetto segue VERSION
+# dell'overlay.
+#
+# BLOCCO DI COMPATIBILITÀ (punto 6): la dipendenza da quickshell è esatta.
+# Se Void aggiorna quickshell, questo pacchetto non si installa finché i QML
+# non sono stati testati e la versione qui sotto non viene aggiornata insieme
+# a build/qml-lint-targets.txt. È voluto: meglio un pacchetto che non parte
+# di un desktop che si rompe a metà aggiornamento.
+pkgname=hyleos-dms
+version=1.6.2
+revision=4
+short_desc="HyleOS - DankMaterialShell (DMS) con QML e tema HyleOS"
+maintainer="Hyle OS Team"
+license="MIT"
+homepage="https://hyleos.org"
+
+depends="
+  quickshell-0.3.2_1
+  hyleos-theme>=1.0.0_1
+  hyprland
+  qt6-base
+  qt6-declarative
+  qt6-svg
+  qt6-wayland
+"
+
+do_install() {
+    vinstall ${FILESDIR}/bin/dms 755 usr/bin
+    # vcopy usa cp -a: la directory di destinazione va creata prima.
+    vmkdir etc/xdg/quickshell
+    vcopy ${FILESDIR}/quickshell/hyleos-dms etc/xdg/quickshell
+}

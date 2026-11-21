@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""HyleOS window mode: tiling automatico oppure finestre libere.
+
+La scelta e' persistente in ~/.config/hyleos/window-mode.json e viene
+applicata a caldo con Hyprland (nessun riavvio della sessione).
+
+Uso:
+    hyleos-window-mode get
+    hyleos-window-mode set tiling|floating
+    hyleos-window-mode toggle
+    hyleos-window-mode apply
+
+Il file e' l'unica fonte di verita': hyprland.lua lo legge all'avvio e la
+shell DMS lo osserva per mostrare lo stato. Questo comando scrive il file in
+modo atomico e poi chiama Hyprland via `hyprctl`.
+
+Nessuna operazione richiede root. Se Hyprland non e' raggiungibile il file
+viene comunque aggiornato: al prossimo login la modalita' sara' rispettata.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+VALID_MODES = ("tiling", "floating")
+DEFAULT_MODE = "tiling"
+CONFIG_VERSION = 1
+RULE_NAME = "hyleos-floating-mode"
+
+# Finestre che devono restare sempre flottanti e centrate: dialoghi di
+# sistema, selettori file, calcolatrice, benvenuto, store e installer.
+PROTECTED_CLASSES = {
+    "org.hyleos.store",
+    "org.hyleos.installer",
+    "org.hyleos.welcome",
+    "xdg-desktop-portal-gtk",
+    "xdg-desktop-portal-gnome",
+    "xdg-desktop-portal-kde",
+    "org.gnome.Calculator",
+    "gnome-calculator",
+    "kcalc",
+    "galculator",
+    "qalculate-gtk",
+    "org.gnome.Nautilus.FileChooser",
+    "com.danklinux.dms",
+}
+
+# Titoli tipici dei dialoghi che non espongono una classe dedicata.
+PROTECTED_TITLE_MARKERS = (
+    "file chooser",
+    "file picker",
+    "seleziona file",
+    "scegli file",
+    "save file",
+    "salva con nome",
+    "apri file",
+    "open file",
+    "preferences",
+    "impostazioni",
+    "settings",
+    "authentication required",
+    "autenticazione richiesta",
+)
+
+
+def config_dir():
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "hyleos")
+
+
+def config_path():
+    return os.path.join(config_dir(), "window-mode.json")
+
+
+def read_mode():
+    """Legge la modalita' dal file. Un file rotto non blocca la sessione."""
+    try:
+        with open(config_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return DEFAULT_MODE
+
+    mode = data.get("mode") if isinstance(data, dict) else None
+    return mode if mode in VALID_MODES else DEFAULT_MODE
+
+
+def write_mode(mode):
+    if mode not in VALID_MODES:
+        raise ValueError("modalita' non valida: %s" % mode)
+
+    directory = config_dir()
+    os.makedirs(directory, exist_ok=True)
+    payload = {"version": CONFIG_VERSION, "mode": mode}
+
+    fd, tmp = tempfile.mkstemp(prefix=".window-mode.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, config_path())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def run_hyprctl(*args, timeout=5):
+    try:
+        result = subprocess.run(
+            ["hyprctl", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result
+
+
+def hyprland_available():
+    result = run_hyprctl("version")
+    return result is not None and result.returncode == 0
+
+
+def clients():
+    result = run_hyprctl("clients", "-j")
+    if result is None or result.returncode != 0:
+        return []
+    try:
+        data = json.loads(result.stdout)
+    except ValueError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def is_protected(client):
+    window_class = (client.get("class") or "").strip()
+    if window_class in PROTECTED_CLASSES:
+        return True
+    # Le classi dei dialoghi possono avere un suffisso (es. .FileChooser).
+    for protected in PROTECTED_CLASSES:
+        if window_class.startswith(protected + "."):
+            return True
+
+    title = (client.get("title") or "").strip().lower()
+    return any(marker in title for marker in PROTECTED_TITLE_MARKERS)
+
+
+def lua_quote(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def dispatch(lua):
+    run_hyprctl("dispatch", lua)
+
+
+def set_rule_enabled(enabled):
+    """Crea (se serve) e abilita/disabilita la regola globale di HyleOS."""
+    flag = "true" if enabled else "false"
+    script = (
+        "if HyleOSFloatingModeRule == nil then "
+        "HyleOSFloatingModeRule = hl.window_rule({ name = %s, "
+        "match = { class = '.*' }, float = true, center = true }) end; "
+        "HyleOSFloatingModeRule:set_enabled(%s)"
+    ) % (lua_quote(RULE_NAME), flag)
+    # Le regole si possono creare solo da config/eval: usiamo eval, non
+    # dispatch (che si aspetta un dispatcher, non una dichiarazione).
+    run_hyprctl("eval", script)
+
+
+def apply_mode(mode):
+    """Applica la modalita' alle finestre gia' aperte, senza riavviare."""
+    if not hyprland_available():
+        return False
+
+    set_rule_enabled(mode == "floating")
+
+    for client in clients():
+        address = client.get("address")
+        if not address or is_protected(client):
+            continue
+
+        floating = bool(client.get("floating"))
+        if mode == "floating" and not floating:
+            selector = lua_quote("address:%s" % address)
+            dispatch("hl.dsp.window.float({ window = %s, action = 'set' })" % selector)
+        elif mode == "tiling" and floating:
+            selector = lua_quote("address:%s" % address)
+            dispatch("hl.dsp.window.float({ window = %s, action = 'unset' })" % selector)
+
+    return True
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+
+    command = argv[1]
+
+    if command == "get":
+        print(read_mode())
+        return 0
+
+    if command == "apply":
+        mode = read_mode()
+        apply_mode(mode)
+        print(mode)
+        return 0
+
+    if command == "set":
+        if len(argv) != 3 or argv[2] not in VALID_MODES:
+            print("Uso: hyleos-window-mode set tiling|floating", file=sys.stderr)
+            return 2
+        mode = argv[2]
+        write_mode(mode)
+        apply_mode(mode)
+        print(mode)
+        return 0
+
+    if command == "toggle":
+        mode = "floating" if read_mode() == "tiling" else "tiling"
+        write_mode(mode)
+        apply_mode(mode)
+        print(mode)
+        return 0
+
+    print("Comando sconosciuto: %s" % command, file=sys.stderr)
+    print("Uso: hyleos-window-mode get|set|toggle|apply", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,54 @@
+# ── Output di build (rigenerabile) ──────────────────────────────────────────
+*.iso
+*.img
+buildfs.img
+/out/*.iso
+/out/*.iso.sha256
+/out/*.iso.sig
+/out/rootfs.img
+/out/rootfs.squashfs
+/out/hyleos-repo/
+/out/vm/
+/build_temp/
+/void-packages/
+/hostdir/
+/xbps-cache/
+RIPRENDI.md
+build.log
+
+# ── Payload dei pacchetti XBPS ──────────────────────────────────────────────
+# Generato dall'overlay con ./build/sync-packages.sh
+# (build-repo.sh lo richiama automaticamente).
+/packages/*/files/
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── Editor e sistemi operativi ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Backup e file temporanei ────────────────────────────────────────────────
+# check-overlay.sh rifiuta questi file dentro out/rootfs-overlay/.
+*.bak
+*.bak.*
+*.orig
+*.rej
+*.tmp
+*.log
+
+# ── Chiavi e segreti (non devono mai finire nel repo) ───────────────────────
+*.pem
+*.key
+id_rsa*
+*.p12
+.env

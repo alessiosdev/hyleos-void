@@ -1,0 +1,2 @@
+#!/bin/sh
+exec elogind 2>&1

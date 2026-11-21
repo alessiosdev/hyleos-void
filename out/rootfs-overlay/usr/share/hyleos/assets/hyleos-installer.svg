@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#9a82db;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#6750a4;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e1a29;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#120f1a;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Squircle Background -->
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bgGrad)" stroke="#49454f" stroke-width="2"/>
+  
+  <!-- Outer Ring -->
+  <circle cx="64" cy="56" r="32" fill="none" stroke="url(#grad1)" stroke-width="6"/>
+  
+  <!-- "H" Stems -->
+  <line x1="50" y1="38" x2="50" y2="74" stroke="#d0bcff" stroke-width="5" stroke-linecap="round"/>
+  <line x1="78" y1="38" x2="78" y2="74" stroke="#d0bcff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M 50 56 Q 64 50 78 56" fill="none" stroke="#9a82db" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="78" cy="38" r="3.5" fill="#ffffff"/>
+
+  <!-- Drive / Install Badge -->
+  <rect x="36" y="94" width="56" height="14" rx="4" fill="#332d41" stroke="#9a82db" stroke-width="1.5"/>
+  <circle cx="44" cy="101" r="2.5" fill="#4caf50"/>
+  <rect x="52" y="99" width="32" height="4" rx="2" fill="#79747e"/>
+</svg>

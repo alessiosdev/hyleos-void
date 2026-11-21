@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Installa Hyle OS
+Comment=Installa Hyle OS in modo permanente su questo computer
+Exec=/usr/bin/hyleos-installer
+TryExec=/usr/bin/hyleos-installer
+StartupNotify=true
+Icon=hyleos-installer
+Terminal=false
+Type=Application
+Categories=System;Settings;
+StartupWMClass=org.hyleos.installer

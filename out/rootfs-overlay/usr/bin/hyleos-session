@@ -1,0 +1,46 @@
+#!/bin/sh
+# Runs after agetty/PAM/elogind have created the user's session.
+set -eu
+
+clear_console() {
+    printf '\033[2J\033[3J\033[H\033[?25l' 2>/dev/null || true
+}
+
+clear_console
+
+# Rilascia Plymouth mantenendo lo splash screen attivo finche' Hyprland
+# non acquisisce il controllo del display DRM (evita sfarfallio e schermo nero).
+if command -v plymouth >/dev/null 2>&1; then
+    plymouth deactivate 2>/dev/null || true
+    plymouth quit --retain-splash 2>/dev/null || plymouth --quit 2>/dev/null || true
+fi
+
+clear_console
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=Hyprland
+export XDG_SESSION_DESKTOP=Hyprland
+
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    if [ -d "/run/user/$(id -u)" ]; then
+        export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    else
+        export XDG_RUNTIME_DIR="/tmp/run-$(id -u)"
+        mkdir -p "$XDG_RUNTIME_DIR"
+        chmod 0700 "$XDG_RUNTIME_DIR"
+    fi
+fi
+
+# Usa elogind come backend nativo per la gestione del seat (DRM master / evdev)
+export LIBSEAT_BACKEND=logind
+
+# Migrazione configurazione idempotente (hyprland.conf -> hyprland.lua, merge
+# dei default DMS, file mancanti da /etc/skel). Non sovrascrive mai ~/.config:
+# aggiunge solo ciò che manca e traccia la versione in
+# ~/.config/hyleos/config-version. Non deve mai bloccare il login.
+if [ -x /usr/bin/hyleos-config-migrate ]; then
+    /usr/bin/hyleos-config-migrate || true
+fi
+
+# Avvia Hyprland tramite start-hyprland (watchdog ufficiale)
+exec dbus-run-session -- start-hyprland

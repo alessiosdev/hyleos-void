@@ -1,0 +1,48 @@
+# Ricetta xbps-src — hyleos-desktop
+#
+# Meta-pacchetto del desktop + default di sistema. I default vivono in
+# /etc/skel e /etc/xdg: gli aggiornamenti non toccano mai ~/.config
+# (vedi hyleos-config-migrate).
+pkgname=hyleos-desktop
+version=1.1.0
+revision=4
+short_desc="HyleOS - desktop Hyprland + DMS e default di sistema"
+maintainer="Hyle OS Team"
+license="MIT"
+homepage="https://hyleos.org"
+
+depends="
+  hyleos-session>=1.0.0_1
+  hyleos-dms>=1.6.2_1
+  hyleos-store>=1.0.0_1
+  hyle>=1.0.0_1
+  hyleos-theme>=1.0.0_1
+  hyprland
+  xdg-desktop-portal-hyprland
+  hyprpolkitagent
+  quickshell-0.3.2_1
+  kitty
+  grim
+  slurp
+  wl-clipboard
+  gtk+3
+  gtk4
+  adwaita-icon-theme
+  accountsservice
+  power-profiles-daemon
+  cups-pk-helper
+  matugen
+  cava
+"
+
+do_install() {
+    # Default di sistema: mai sovrascritti in ~/.config.
+    # vcopy usa cp -a: le directory di destinazione vanno create prima.
+    vmkdir etc
+    vmkdir etc/xdg
+    vcopy ${FILESDIR}/skel etc
+    vcopy ${FILESDIR}/xdg/xsettingsd etc/xdg
+    vinstall ${FILESDIR}/gtk-3.0/settings.ini 644 etc/gtk-3.0
+    vinstall ${FILESDIR}/gtk-4.0/settings.ini 644 etc/gtk-4.0
+    vinstall ${FILESDIR}/profile.d/xdg-user-dirs.sh 644 etc/profile.d
+}

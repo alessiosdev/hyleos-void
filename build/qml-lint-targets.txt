@@ -1,0 +1,25 @@
+# File QML di HyleOS da verificare con qmllint prima della build.
+# Percorsi relativi a out/rootfs-overlay/.
+#
+# Aggiungi qui ogni .qml che modifichiamo rispetto a DMS upstream: con ~1100
+# file, lintare tutto produrrebbe solo rumore sugli import qs.* non
+# risolvibili fuori da quickshell. Questi sono i punti che HyleOS tocca.
+etc/xdg/quickshell/hyleos-dms/Common/SettingsData.qml
+etc/xdg/quickshell/hyleos-dms/Services/SystemUpdateService.qml
+etc/xdg/quickshell/hyleos-dms/Services/HyprlandService.qml
+etc/xdg/quickshell/hyleos-dms/Services/HyleOSService.qml
+etc/xdg/quickshell/hyleos-dms/Services/DesktopMenuService.qml
+etc/xdg/quickshell/hyleos-dms/DMSShellIPC.qml
+etc/xdg/quickshell/hyleos-dms/shell.qml
+etc/xdg/quickshell/hyleos-dms/Modules/WallpaperBackground.qml
+etc/xdg/quickshell/hyleos-dms/Modules/DesktopContextMenu.qml
+etc/xdg/quickshell/hyleos-dms/Modules/DankBar/DankBarContent.qml
+etc/xdg/quickshell/hyleos-dms/Modules/DankBar/WidgetHost.qml
+etc/xdg/quickshell/hyleos-dms/Modules/DankBar/Widgets/FocusedApp.qml
+etc/xdg/quickshell/hyleos-dms/Modules/DankBar/Widgets/OverviewButton.qml
+etc/xdg/quickshell/hyleos-dms/Modules/ControlCenter/Components/HeaderPane.qml
+etc/xdg/quickshell/hyleos-dms/Modules/Settings/WidgetsTab.qml
+etc/xdg/quickshell/hyleos-dms/Modules/Settings/WorkspacesTab.qml
+etc/xdg/quickshell/hyleos-dms/Modules/Settings/SystemUpdaterTab.qml
+etc/xdg/quickshell/hyleos-dms/Modals/Settings/SettingsSidebar.qml
+etc/xdg/quickshell/hyleos-dms/Modals/Settings/SettingsContent.qml

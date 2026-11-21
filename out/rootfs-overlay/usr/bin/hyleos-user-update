@@ -1,0 +1,70 @@
+#!/bin/sh
+# hyleos-user-update — ingresso unico agli aggiornamenti di HyleOS.
+#
+# Le AppImage vivono nell'home dell'utente e vanno aggiornate senza privilegi:
+# lo fa hyleos-appimage-update, in modalità best-effort. La parte di sistema
+# resta a hyleos-system-update, che gestisce da sé l'elevazione quando serve.
+# Se il sistema viene annullato o fallisce, l'esito è esplicito e il codice di
+# uscita viene propagato: mai un "completato" silenzioso.
+set -u
+
+APPIMAGE_UPDATER=/usr/bin/hyleos-appimage-update
+SYSTEM_UPDATER=/usr/bin/hyleos-system-update
+
+CHECK=0
+for arg in "$@"; do
+    if [ "$arg" = "--check" ]; then
+        CHECK=1
+    fi
+done
+
+if [ "$(id -u)" -eq 0 ]; then
+    APPIMAGE_STATE="saltati (root)"
+    echo "Aggiornamenti AppImage saltati: richiedono l'utente, non root."
+else
+    if [ "$CHECK" -eq 1 ]; then
+        APPIMAGE_STATE="verificati"
+    else
+        APPIMAGE_STATE="processati"
+    fi
+    if [ -x "$APPIMAGE_UPDATER" ]; then
+        if ! "$APPIMAGE_UPDATER" "$@"; then
+            case "$APPIMAGE_STATE" in
+                verificati) APPIMAGE_STATE="verificati con errori" ;;
+                *) APPIMAGE_STATE="processati con errori" ;;
+            esac
+            echo "Attenzione: aggiornamento AppImage non riuscito; proseguo con il sistema." >&2
+        fi
+    else
+        APPIMAGE_STATE="non verificati (updater mancante)"
+        [ "$CHECK" -eq 1 ] || APPIMAGE_STATE="non processati (updater mancante)"
+        echo "Attenzione: $APPIMAGE_UPDATER non trovato; proseguo con il sistema." >&2
+    fi
+fi
+
+echo "AppImage: $APPIMAGE_STATE."
+
+"$SYSTEM_UPDATER" "$@"
+rc=$?
+
+case "$rc" in
+    0)
+        ;;
+    1)
+        if [ "$CHECK" -eq 0 ]; then
+            echo "Aggiornamento di sistema fallito (codice 1)." >&2
+        fi
+        ;;
+    126|127)
+        if [ "$(id -u)" -ne 0 ]; then
+            echo "Aggiornamento di sistema annullato o non autorizzato (Polkit, codice $rc)." >&2
+        else
+            echo "Aggiornamento di sistema fallito (codice $rc)." >&2
+        fi
+        ;;
+    *)
+        echo "Aggiornamento di sistema fallito (codice $rc)." >&2
+        ;;
+esac
+
+exit "$rc"

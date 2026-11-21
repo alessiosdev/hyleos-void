@@ -1,0 +1,95 @@
+#!/bin/sh
+# hyleos-store-xbps — helper privilegiato per HyleOS Store.
+#
+# Eseguito via pkexec/polkit. È l'unico punto che tocca XBPS come root, quindi
+# qui la lista protetta è autorevole: il client Python non è fidato.
+#
+# Uso:
+#   hyleos-store-xbps preflight <pkg>
+#   hyleos-store-xbps install   <pkg>
+#   hyleos-store-xbps remove    <pkg>
+#
+# Exit code:
+#   0  successo
+#   2  uso o nome pacchetto non valido
+#   3  pacchetto protetto
+#   4  preflight fallito
+#   5  serve aggiornare prima il sistema
+set -u
+
+PROTECTED="base-system hyprland hyleos-dms hyleos-desktop hyleos-store hyleos-session quickshell NetworkManager pipewire pipewire-pulse wireplumber elogind dbus xbps glibc linux linux6.6 linux6.12 linux6.18"
+CORE="xbps glibc base-system hyprland hyleos-dms hyleos-desktop hyleos-store quickshell mesa wayland elogind dbus"
+
+die() { msg="$1"; code="${2:-4}"; echo "ERRORE: $msg" >&2; exit "$code"; }
+
+[ "$#" -eq 2 ] || die "uso: $0 preflight|install|remove <pkg>" 2
+action="$1"
+pkg="$2"
+
+printf '%s\n' "$pkg" | grep -Eq '^[A-Za-z0-9@._+:-]+$' || die "nome pacchetto non valido" 2
+
+is_in_list() {
+    needle="$1"; shift
+    for item in $*; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+# Protegge anche i kernel futuri (linux6.19, linux-firmware, ...).
+is_protected() {
+    is_in_list "$1" $PROTECTED && return 0
+    case "$1" in
+        linux*) return 0 ;;
+    esac
+    return 1
+}
+
+if [ "$action" = "remove" ] && is_protected "$pkg"; then
+    die "componente protetto: $pkg" 3
+fi
+
+preflight() {
+    out="$(xbps-install -Sny "$pkg" 2>&1)" || {
+        printf '%s\n' "$out" >&2
+        exit 4
+    }
+    low="$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')"
+    case "$low" in
+        *"already installed"*) return 0 ;;
+    esac
+
+    # Formato: <pkgver> <action> <arch> <repo> ...
+    blocked="$(printf '%s\n' "$out" | awk '$2 == "update" || $2 == "downgrade" {print $1}' \
+        | while IFS= read -r pv; do
+            name="${pv%-*}"
+            [ "$name" = "$pkg" ] && continue
+            case "$name" in
+                linux*) echo "$name"; continue ;;
+            esac
+            for core in $CORE; do
+                [ "$name" = "$core" ] && echo "$name"
+            done
+          done | sort -u)"
+    if [ -n "$blocked" ]; then
+        echo "Questa installazione richiede di aggiornare prima: $blocked" >&2
+        exit 5
+    fi
+    return 0
+}
+
+case "$action" in
+    preflight)
+        preflight
+        ;;
+    install)
+        preflight || exit $?
+        exec xbps-install -Sy "$pkg"
+        ;;
+    remove)
+        exec xbps-remove -Ry "$pkg"
+        ;;
+    *)
+        die "azione sconosciuta: $action" 2
+        ;;
+esac

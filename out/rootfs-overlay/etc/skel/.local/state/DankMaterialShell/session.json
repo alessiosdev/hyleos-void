@@ -1,0 +1,22 @@
+{
+  "configVersion": 7,
+  "wallpaperPath": "/usr/share/backgrounds/hyleos/wallpaper.png",
+  "wallpaperPathLight": "/usr/share/backgrounds/hyleos/wallpaper.png",
+  "wallpaperPathDark": "/usr/share/backgrounds/hyleos/wallpaper.png",
+  "pinnedApps": [
+    "kitty",
+    "firefox",
+    "org.gnome.Nautilus",
+    "org.hyleos.store",
+    "org.hyleos.installer"
+  ],
+  "dockPins": {
+    "dock": [
+      "kitty",
+      "firefox",
+      "org.gnome.Nautilus",
+      "org.hyleos.store",
+      "org.hyleos.installer"
+    ]
+  }
+}

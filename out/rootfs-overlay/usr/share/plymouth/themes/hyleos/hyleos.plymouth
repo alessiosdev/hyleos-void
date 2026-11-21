@@ -1,0 +1,17 @@
+[Plymouth Theme]
+Name=Hyle OS
+Description=Official Hyle OS Material You Boot Animation
+ModuleName=two-step
+
+[two-step]
+ImageDir=/usr/share/plymouth/themes/hyleos
+HorizontalAlignment=.5
+VerticalAlignment=.5
+WatermarkHorizontalAlignment=.5
+WatermarkVerticalAlignment=.42
+Transition=none
+TransitionDuration=0.0
+BackgroundStartColor=0x0c0a11
+BackgroundEndColor=0x161224
+UseAnimation=true
+UseEndAnimation=false

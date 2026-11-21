@@ -1,0 +1,33 @@
+# Ricetta xbps-src — hyleos-session
+#
+# Script di sessione (avvio Hyprland/DMS, migrazione configurazione) e
+# manutenzione del sistema (aggiornamento unico, pulizia kernel).
+pkgname=hyleos-session
+version=1.0.0
+revision=3
+short_desc="HyleOS - sessione utente, migrazione config e manutenzione"
+maintainer="Hyle OS Team"
+license="MIT"
+homepage="https://hyleos.org"
+
+# La sessione avvia DMS: la versione è pinnata insieme a hyleos-dms per
+# evitare che un aggiornamento upstream cambi i QML senza test.
+depends="
+  hyleos-dms>=1.6.2_1
+  hyleos-theme>=1.0.0_1
+  dbus
+  elogind
+  polkit
+  xbps
+"
+
+do_install() {
+    vinstall ${FILESDIR}/bin/hyleos-session 755 usr/bin
+    vinstall ${FILESDIR}/bin/hyleos-config-migrate 755 usr/bin
+    vinstall ${FILESDIR}/bin/hyleos-dms-start 755 usr/bin
+    vinstall ${FILESDIR}/bin/hyleos-system-update 755 usr/bin
+    vinstall ${FILESDIR}/bin/hyleos-window-mode 755 usr/bin
+    vinstall ${FILESDIR}/libexec/hyleos/kernel-cleanup 755 usr/libexec/hyleos
+    vinstall ${FILESDIR}/profile.d/hyleos-session.sh 644 etc/profile.d
+    vinstall ${FILESDIR}/polkit/org.hyleos.update.system.policy 644 usr/share/polkit-1/actions
+}

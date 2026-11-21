@@ -1,0 +1,20 @@
+# Ricetta xbps-src — hyle (assistente CLI) e hyle-welcome
+pkgname=hyle
+version=1.0.0
+revision=3
+short_desc="HyleOS - assistente CLI (update, clean, repair) e benvenuto"
+maintainer="Hyle OS Team"
+license="MIT"
+homepage="https://hyleos.org"
+
+depends="
+  python3
+  hyleos-session>=1.0.0_1
+"
+
+do_install() {
+    vinstall ${FILESDIR}/bin/hyle 755 usr/bin
+    vinstall ${FILESDIR}/bin/hyle-welcome 755 usr/bin
+    vinstall ${FILESDIR}/share/hyleos/welcome.py 644 usr/share/hyleos
+    vinstall ${FILESDIR}/applications/org.hyleos.welcome.desktop 644 usr/share/applications
+}

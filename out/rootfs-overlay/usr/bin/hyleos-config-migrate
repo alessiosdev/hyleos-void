@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Migrazione idempotente della configurazione utente di HyleOS.
+
+Obiettivo: gli aggiornamenti della distro possono cambiare i default in
+/etc/skel e /etc/xdg, ma non devono mai sovrascrivere le scelte dell'utente in
+~/.config. Questo script:
+
+  * crea solo i file mancanti, copiandoli dai default di sistema;
+  * per i file JSON fa un merge "add-missing" (aggiunge le chiavi nuove,
+    lascia intatte quelle già presenti);
+  * esegue migrazioni di formato una volta sola, tracciate da
+    ~/.config/hyleos/config-version.
+
+È pensato per essere chiamato a ogni login da hyleos-session. Non deve mai
+impedire l'avvio della sessione: qualunque errore viene loggato e ignorato.
+
+Uso:
+    hyleos-config-migrate [--dry-run] [--force-version N] [--home DIR]
+
+Variabili:
+    HYLEOS_SKEL   directory dei default (default: /etc/skel)
+    HYLEOS_STATE  directory di stato  (default: $XDG_STATE_HOME/hyleos)
+"""
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import time
+import traceback
+
+# Incrementa questo numero quando aggiungi una migrazione.
+CONFIG_VERSION = 3
+
+SKEL = os.environ.get("HYLEOS_SKEL", "/etc/skel")
+
+# File che vengono creati solo se mancano. Nessun overwrite.
+COPY_IF_MISSING = [
+    ".config/kitty/kitty.conf",
+    ".config/fastfetch/config.jsonc",
+    ".config/gtk-3.0/settings.ini",
+    ".config/gtk-4.0/settings.ini",
+    ".config/xsettingsd/xsettingsd.conf",
+    ".config/hypr/hyprland.lua",
+    ".config/hyleos/window-mode.json",
+    ".local/state/DankMaterialShell/session.json",
+]
+
+# File JSON mergiati con add-missing.
+JSON_MERGE = [
+    ".config/DankMaterialShell/settings.json",
+]
+
+# File che non devono mai essere copiati: contengono stato o segreti.
+NEVER_COPY = [
+    ".config/hypr/hyprland.conf",
+    ".bash_history",
+]
+
+
+def log(msg, state_dir):
+    line = "%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg)
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, "config-migrate.log"), "a") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def merge_missing(target, defaults):
+    """Aggiunge a target solo le chiavi assenti. Ritorna True se ha cambiato."""
+    changed = False
+    for key, value in defaults.items():
+        if key not in target:
+            target[key] = value
+            changed = True
+        elif isinstance(value, dict) and isinstance(target.get(key), dict):
+            if merge_missing(target[key], value):
+                changed = True
+    return changed
+
+
+def atomic_write(path, text):
+    tmp = path + ".tmp.hyleos"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def read_version(marker):
+    try:
+        with open(marker) as f:
+            return int(f.read().strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+def write_version(marker, version):
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    atomic_write(marker, "%d\n" % version)
+
+
+def copy_missing(home, rel, state_dir, dry_run):
+    src = os.path.join(SKEL, rel)
+    dst = os.path.join(home, rel)
+    if not os.path.isfile(src) or os.path.exists(dst):
+        return False
+    log("creo %s da %s" % (dst, src), state_dir)
+    if dry_run:
+        return True
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+    return True
+
+
+def merge_json_file(home, rel, state_dir, dry_run):
+    src = os.path.join(SKEL, rel)
+    dst = os.path.join(home, rel)
+    if not os.path.isfile(src):
+        return False
+    defaults = {}
+    try:
+        with open(src) as f:
+            defaults = json.load(f)
+    except (OSError, ValueError) as exc:
+        log("default JSON illeggibile %s: %s" % (src, exc), state_dir)
+        return False
+
+    current = {}
+    if os.path.exists(dst):
+        try:
+            with open(dst) as f:
+                current = json.load(f)
+        except (OSError, ValueError) as exc:
+            # Non toccare un file che l'utente ha rotto: potrebbe volerlo
+            # riparare a mano. Lo segnaliamo soltanto.
+            log("settings.json utente non valido, non lo modifico: %s" % exc, state_dir)
+            return False
+    elif not isinstance(defaults, dict):
+        return False
+
+    if not isinstance(current, dict):
+        return False
+
+    changed = merge_missing(current, defaults)
+    if not changed:
+        return False
+
+    log("merge add-missing in %s" % dst, state_dir)
+    if dry_run:
+        return True
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    atomic_write(dst, json.dumps(current, indent=2, ensure_ascii=False) + "\n")
+    return True
+
+
+def migrate_hyprland(home, state_dir, dry_run):
+    """Hyprland >= 0.57 legge solo hyprland.lua.
+
+    Se l'utente ha ancora solo hyprland.conf, lo mettiamo da parte (senza
+    cancellarlo) e installiamo il default Lua. Se hyprland.lua esiste già non
+    lo tocchiamo: le modifiche dell'utente vincono sempre.
+    """
+    hypr = os.path.join(home, ".config/hypr")
+    lua = os.path.join(hypr, "hyprland.lua")
+    conf = os.path.join(hypr, "hyprland.conf")
+    skel_lua = os.path.join(SKEL, ".config/hypr/hyprland.lua")
+
+    if os.path.exists(lua) or not os.path.isfile(skel_lua):
+        return False
+
+    os.makedirs(hypr, exist_ok=True)
+    if os.path.exists(conf):
+        backup = "%s.pre-lua.%s" % (conf, time.strftime("%Y%m%d%H%M%S"))
+        log("hyprland.conf spostato in %s" % backup, state_dir)
+        if not dry_run:
+            os.replace(conf, backup)
+    log("installo hyprland.lua di default in %s" % lua, state_dir)
+    if not dry_run:
+        shutil.copy2(skel_lua, lua)
+    return True
+
+
+def run(home, state_dir, dry_run=False, force_version=None):
+    marker = os.path.join(home, ".config/hyleos/config-version")
+    current = force_version if force_version is not None else read_version(marker)
+    changed = False
+
+    # Migrazioni di formato, una volta sola. Vanno PRIMA delle copie
+    # add-missing: su un sistema aggiornato da una ISO vecchia esiste
+    # hyprland.conf ma non hyprland.lua, e la copia del default creerebbe il
+    # .lua facendo sembrare la migrazione già fatta (lasciando il .conf in
+    # giro). Così invece il vecchio file viene messo da parte correttamente.
+    if current < 1:
+        changed |= migrate_hyprland(home, state_dir, dry_run)
+    if current < 2:
+        # v2: assicura che la directory di stato esista e che il marker sia
+        # leggibile; nessuna modifica distruttiva.
+        if not dry_run:
+            os.makedirs(state_dir, exist_ok=True)
+    if current < 3:
+        # v3: introduce ~/.config/hyleos/window-mode.json (tiling/floating).
+        # La copia add-missing qui sotto crea il file solo se manca, quindi
+        # una scelta gia' fatta dall'utente non viene mai sovrascritta.
+        if not dry_run:
+            os.makedirs(os.path.join(home, ".config/hyleos"), exist_ok=True)
+
+    # Le operazioni "add-missing" sono sempre sicure e idempotenti: le
+    # eseguiamo a ogni login, non solo al cambio di versione. Costano pochi ms.
+    for rel in COPY_IF_MISSING:
+        changed |= copy_missing(home, rel, state_dir, dry_run)
+    for rel in JSON_MERGE:
+        changed |= merge_json_file(home, rel, state_dir, dry_run)
+
+    if not dry_run and CONFIG_VERSION > current:
+        write_version(marker, CONFIG_VERSION)
+        log("config-version %d -> %d" % (current, CONFIG_VERSION), state_dir)
+
+    return changed
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Migrazione configurazione HyleOS")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force-version", type=int, default=None)
+    parser.add_argument("--home", default=os.path.expanduser("~"))
+    args = parser.parse_args(argv)
+
+    home = os.path.abspath(args.home)
+    state_dir = os.environ.get(
+        "HYLEOS_STATE",
+        os.path.join(
+            os.environ.get("XDG_STATE_HOME", os.path.join(home, ".local/state")),
+            "hyleos",
+        ),
+    )
+
+    try:
+        run(home, state_dir, dry_run=args.dry_run, force_version=args.force_version)
+    except Exception:
+        log("migrazione fallita:\n%s" % traceback.format_exc(), state_dir)
+        return 0  # mai bloccare il login
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

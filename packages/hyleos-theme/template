@@ -1,0 +1,20 @@
+# Ricetta xbps-src — hyleos-theme
+#
+# Asset, sfondi e tema condivisi. Separati dal codice così un cambio di
+# wallpaper/logo non richiede di ricostruire hyleos-dms.
+pkgname=hyleos-theme
+version=1.0.0
+revision=1
+short_desc="HyleOS - tema, sfondi, logo e asset grafici"
+maintainer="Hyle OS Team"
+license="MIT"
+homepage="https://hyleos.org"
+
+do_install() {
+    # vcopy usa cp -a: le directory di destinazione vanno create prima.
+    vmkdir usr/share/hyleos
+    vmkdir usr/share/backgrounds
+    vcopy ${FILESDIR}/hyleos/assets usr/share/hyleos
+    vcopy ${FILESDIR}/hyleos/themes usr/share/hyleos
+    vcopy ${FILESDIR}/backgrounds/hyleos usr/share/backgrounds
+}

@@ -1,0 +1,32 @@
+# Ricetta xbps-src — hyleos-store
+pkgname=hyleos-store
+version=1.0.0
+revision=4
+short_desc="HyleOS Store - app desktop via XBPS e AppImage utente"
+maintainer="Hyle OS Team"
+license="MIT"
+homepage="https://hyleos.org"
+
+depends="
+  python3
+  python3-gobject
+  gtk4
+  fuse
+  polkit
+  xbps
+  hyleos-theme>=1.0.0_1
+"
+
+do_install() {
+    vinstall ${FILESDIR}/bin/hyleos-appimage-update 755 usr/bin
+    vinstall ${FILESDIR}/bin/hyleos-user-update 755 usr/bin
+    vinstall ${FILESDIR}/share/hyleos/appstore.py 644 usr/share/hyleos
+    vinstall ${FILESDIR}/share/hyleos/xbps_backend.py 644 usr/share/hyleos
+    vinstall ${FILESDIR}/share/hyleos/appimage_backend.py 644 usr/share/hyleos
+    vinstall ${FILESDIR}/share/hyleos/appimage-catalog.json 644 usr/share/hyleos
+    vinstall ${FILESDIR}/share/hyleos/appimage-catalog.example.json 644 usr/share/hyleos
+    vinstall ${FILESDIR}/libexec/hyleos/hyleos-store-xbps 755 usr/libexec/hyleos
+    vinstall ${FILESDIR}/polkit/org.hyleos.store.xbps.policy 644 usr/share/polkit-1/actions
+    vinstall ${FILESDIR}/applications/hyleos-store.desktop 644 usr/share/applications
+    vinstall ${FILESDIR}/applications/org.hyleos.store.desktop 644 usr/share/applications
+}

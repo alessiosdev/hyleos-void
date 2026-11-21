@@ -1,0 +1,152 @@
+#!/bin/bash
+# kernel-cleanup — mantiene sempre almeno gli ultimi N kernel installati.
+#
+# Perché esiste: quando Void aggiorna linux6.x, il kernel vecchio resta in /boot
+# e nel bootloader. Se lo si cancella subito e il nuovo kernel ha una
+# regressione (Wi-Fi, sospensione, GPU), l'utente non ha più un sistema
+# avviabile da cui fare rollback. Questo script elimina solo i kernel più
+# vecchi, lasciando sempre gli ultimi 2 (configurabile) e il kernel in uso.
+#
+# Uso:
+#   kernel-cleanup                 elimina i kernel oltre i 2 più recenti
+#   kernel-cleanup --dry-run       mostra cosa farebbe
+#   kernel-cleanup --keep 3        mantiene i 3 più recenti
+#   kernel-cleanup --list          elenca i kernel presenti
+#
+# Variabili (usate anche dai test):
+#   HYLEOS_KEEP_KERNELS    numero di kernel da mantenere (default 2)
+#   HYLEOS_BOOT_DIR        directory di boot (default /boot)
+#   HYLEOS_RUNNING_KERNEL  versione del kernel in uso (default uname -r)
+#   HYLEOS_DRY_RUN=1       equivale a --dry-run
+#
+# Usa vkpurge quando disponibile: è lui che conosce i kernel ancora posseduti
+# da un pacchetto linux* e non li tocca mai.
+set -u
+
+BOOT_DIR="${HYLEOS_BOOT_DIR:-/boot}"
+KEEP="${HYLEOS_KEEP_KERNELS:-2}"
+RUNNING="${HYLEOS_RUNNING_KERNEL:-$(uname -r 2>/dev/null || true)}"
+DRY="${HYLEOS_DRY_RUN:-0}"
+LOG_DIR="/var/log/hyleos"
+LOG="$LOG_DIR/kernel-cleanup.log"
+
+usage() {
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+say() { printf '%s\n' "$*"; }
+
+# Se /var/log/hyleos non è scrivibile (test, live ISO), il log va su /dev/null
+# invece di far fallire i comandi con la redirezione.
+if mkdir -p "$LOG_DIR" 2>/dev/null && touch "$LOG" 2>/dev/null; then
+    :
+else
+    LOG="/dev/null"
+fi
+
+log() {
+    say "$*"
+    printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG" 2>/dev/null || true
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY=1 ;;
+        --keep)
+            [ "$#" -ge 2 ] || { say "ERRORE: --keep richiede un numero" >&2; exit 2; }
+            KEEP="$2"; shift ;;
+        --keep=*) KEEP="${1#*=}" ;;
+        --list) LIST_ONLY=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) say "Opzione sconosciuta: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+case "$KEEP" in
+    ''|*[!0-9]*) say "ERRORE: --keep deve essere un numero intero (ricevuto: '$KEEP')" >&2; exit 2 ;;
+esac
+[ "$KEEP" -ge 1 ] || { say "ERRORE: bisogna mantenere almeno 1 kernel" >&2; exit 2; }
+
+[ -d "$BOOT_DIR" ] || { say "ERRORE: $BOOT_DIR non esiste" >&2; exit 1; }
+
+# Versioni presenti in /boot, dalla più vecchia alla più recente.
+mapfile -t present < <(
+    find "$BOOT_DIR" -maxdepth 1 -type f -name 'vmlinuz-*' -printf '%f\n' 2>/dev/null \
+        | sed 's/^vmlinuz-//' \
+        | grep -E '^[0-9]' \
+        | sort -V
+)
+
+if [ "${#present[@]}" -eq 0 ]; then
+    say "Nessun kernel trovato in $BOOT_DIR."
+    exit 0
+fi
+
+if [ "${LIST_ONLY:-0}" = "1" ]; then
+    say "Kernel presenti in $BOOT_DIR (dal più vecchio):"
+    for v in "${present[@]}"; do
+        mark=""
+        [ "$v" = "$RUNNING" ] && mark=" (in uso)"
+        printf '  %s%s\n' "$v" "$mark"
+    done
+    say "Da mantenere: ultimi $KEEP + kernel in uso."
+    exit 0
+fi
+
+# Proteggi i KEEP più recenti e sempre il kernel in uso.
+declare -A keep_set=()
+start=$(( ${#present[@]} - KEEP ))
+[ "$start" -lt 0 ] && start=0
+for ((i = start; i < ${#present[@]}; i++)); do
+    keep_set["${present[$i]}"]=1
+done
+[ -n "$RUNNING" ] && keep_set["$RUNNING"]=1
+
+# Candidati: quello che vkpurge considera rimovibile (non posseduto da un
+# pacchetto linux*). Se vkpurge manca, non indoviniamo: non cancelliamo nulla.
+if ! command -v vkpurge >/dev/null 2>&1; then
+    say "vkpurge non installato: nessun kernel verrà rimosso."
+    say "Installa il pacchetto void-runit (fornisce /usr/bin/vkpurge)."
+    exit 0
+fi
+
+mapfile -t purgeable < <(
+    vkpurge list 2>/dev/null \
+        | sed 's/[[:space:]]//g' \
+        | grep -E '^[0-9][A-Za-z0-9._-]*$' \
+        | sort -V
+)
+
+if [ "${#purgeable[@]}" -eq 0 ]; then
+    say "Nessun kernel vecchio da rimuovere (vkpurge non segnala candidati)."
+    exit 0
+fi
+
+removed=0
+kept=0
+for v in "${purgeable[@]}"; do
+    if [ -n "${keep_set[$v]:-}" ]; then
+        kept=$((kept + 1))
+        continue
+    fi
+    if [ "$DRY" = "1" ]; then
+        log "[dry-run] rimuoverei il kernel $v"
+        removed=$((removed + 1))
+        continue
+    fi
+    log "rimuovo il kernel $v"
+    if vkpurge rm "$v" >>"$LOG" 2>&1; then
+        removed=$((removed + 1))
+    else
+        say "  [!] rimozione di $v fallita (vedi $LOG)" >&2
+    fi
+done
+
+say "Kernel mantenuti: ${#keep_set[@]} (ultimi $KEEP + in uso)."
+if [ "$DRY" = "1" ]; then
+    say "[dry-run] kernel da rimuovere: $removed"
+else
+    say "Kernel rimossi: $removed"
+fi
+exit 0

@@ -1,0 +1,105 @@
+#!/bin/sh
+# Launcher per Hyle OS Installer con elevazione privilegi e sessione Wayland.
+#
+# sudo/doas azzerano l'ambiente (env_reset): senza WAYLAND_DISPLAY,
+# XDG_RUNTIME_DIR e DBUS_SESSION_BUS_ADDRESS l'app GTK4 avviata come root non
+# si connette alla sessione Wayland e non compare a schermo. Le variabili della
+# sessione vanno quindi propagate esplicitamente a ogni elevazione.
+#
+# Senza TTY (DMS, menu delle applicazioni) serve pkexec, che richiama questo
+# stesso script come root passando le variabili come argomenti interni
+# --hyleos-env NAME=VALUE. Un utente normale non può iniettarne: root accetta
+# solo la whitelist qui sotto.
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+PY=/usr/share/hyleos/installer.py
+UID_NOW="$(id -u)"
+
+is_session_var() {
+    case "$1" in
+        WAYLAND_DISPLAY|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|XDG_SESSION_TYPE|HYPRLAND_INSTANCE_SIGNATURE|DISPLAY|XAUTHORITY)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Rimuove dall'argv le coppie --hyleos-env NAME=VALUE. Gli argomenti già
+# esaminati vengono ruotati in fondo a "$@" mantenendone l'ordine: così non
+# serve eval e anche argomenti con spazi restano intatti.
+TOTAL=$#
+DONE_ARG=0
+while [ "$DONE_ARG" -lt "$TOTAL" ]; do
+    PENDING=$((TOTAL - DONE_ARG))
+    case "$1" in
+        --hyleos-env)
+            if [ "$PENDING" -ge 2 ]; then
+                PAIR=$2
+                shift 2
+                DONE_ARG=$((DONE_ARG + 2))
+                NAME=${PAIR%%=*}
+                if [ "$PAIR" != "$NAME" ] && [ "$UID_NOW" -eq 0 ] && is_session_var "$NAME"; then
+                    VALUE=${PAIR#*=}
+                    export "$NAME=$VALUE"
+                fi
+            else
+                # Coppia interna monca: si scarta senza toccare gli altri argomenti.
+                shift
+                DONE_ARG=$((DONE_ARG + 1))
+            fi
+            ;;
+        *)
+            set -- "$@" "$1"
+            shift
+            DONE_ARG=$((DONE_ARG + 1))
+            ;;
+    esac
+done
+
+if [ "$UID_NOW" -eq 0 ]; then
+    exec python3 "$PY" "$@"
+fi
+
+if [ -t 0 ] && [ -t 1 ]; then
+    # In terminale doas/sudo possono mostrare il prompt della password.
+    if command -v doas >/dev/null 2>&1 && [ -f /etc/doas.conf ]; then
+        exec doas env \
+            WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+            XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+            DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
+            XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}" \
+            HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-}" \
+            DISPLAY="${DISPLAY:-}" \
+            XAUTHORITY="${XAUTHORITY:-}" \
+            python3 "$PY" "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        exec sudo env \
+            WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+            XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+            DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
+            XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}" \
+            HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-}" \
+            DISPLAY="${DISPLAY:-}" \
+            XAUTHORITY="${XAUTHORITY:-}" \
+            python3 "$PY" "$@"
+    fi
+fi
+
+# Senza TTY (o senza doas/sudo) serve pkexec, con il suo agente grafico.
+# pkexec "$SELF" (non "pkexec env ...") fa combaciare exec.path con la policy.
+if command -v pkexec >/dev/null 2>&1; then
+    exec pkexec "$SELF" \
+        --hyleos-env WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+        --hyleos-env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        --hyleos-env DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+        --hyleos-env XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}" \
+        --hyleos-env HYPRLAND_INSTANCE_SIGNATURE="$HYPRLAND_INSTANCE_SIGNATURE" \
+        --hyleos-env DISPLAY="$DISPLAY" \
+        --hyleos-env XAUTHORITY="$XAUTHORITY" \
+        "$@"
+fi
+
+echo "Servono i privilegi di root. Eseguire da terminale (doas/sudo) o installare polkit." >&2
+exit 1

@@ -1,0 +1,12 @@
+// Nella ISO live l'utente "anon" esiste e può avviare l'installer senza
+// digitare la password. Dopo l'installazione "anon" viene rimosso: la regola
+// diventa inerte sul sistema installato, dove resta auth_admin.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.hyleos.installer.launch" &&
+        subject.user() == "anon" &&
+        subject.active &&
+        subject.local) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

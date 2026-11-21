@@ -1,0 +1,209 @@
+#!/bin/bash
+# hyleos-system-update — aggiornamento unico e verificabile di HyleOS.
+#
+# Perché esiste: la voce "Aggiornamenti di sistema" di DMS deve fare una cosa
+# sola, sempre uguale, con log e controlli. Aggiornare a mano con più comandi
+# diversi è il modo più semplice per rompere un sistema che deve durare anni.
+#
+# Le AppImage sono gestite lato utente da hyleos-user-update, che richiama
+# questo script dopo averle aggiornate: qui resta solo la parte di sistema.
+#
+# Ordine:
+#   1. xbps (il package manager stesso, va aggiornato per primo)
+#   2. sistema completo (xbps-install -Suy)
+#   3. pulizia kernel: tiene sempre almeno gli ultimi 2
+#
+# Uso:
+#   hyleos-system-update              aggiorna (chiede la password se serve)
+#   hyleos-system-update --check      esce 0 se ci sono aggiornamenti, 1 se no
+#   hyleos-system-update --dry-run    mostra cosa farebbe, senza toccare nulla
+#   hyleos-system-update --yes        accetta senza chiedere (compatibilità)
+#
+# Log: /var/log/hyleos/update.log
+# Flag di riavvio: /var/lib/hyleos/reboot-required
+set -u
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+LOG_DIR="/var/log/hyleos"
+LOG="$LOG_DIR/update.log"
+STATE_DIR="/var/lib/hyleos"
+REBOOT_FLAG="$STATE_DIR/reboot-required"
+MIN_FREE_MB="${HYLEOS_MIN_FREE_MB:-3072}"
+REPO_URL="${HYLEOS_REPO_URL:-https://repo-default.voidlinux.org/current/}"
+KERNEL_CLEANUP="/usr/libexec/hyleos/kernel-cleanup"
+
+DO_CHECK=0
+DO_DRY=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --check) DO_CHECK=1 ;;
+        --dry-run) DO_DRY=1 ;;
+        --yes|-y) : ;;
+        -h|--help)
+            sed -n '2,30p' "$SELF" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "Opzione non riconosciuta, ignorata: $arg" >&2
+            ;;
+    esac
+done
+
+say() { printf '%s\n' "$*"; }
+die() { say "ERRORE: $*" >&2; exit 1; }
+
+# --check non tocca nulla e non richiede root: va gestito prima dell'elevazione.
+if [ "$DO_CHECK" -eq 1 ]; then
+    command -v xbps-install >/dev/null 2>&1 || exit 2
+    out="$(xbps-install -un 2>/dev/null || true)"
+    if [ -n "$out" ]; then
+        say "Aggiornamenti disponibili:"
+        say "$out"
+        exit 0
+    fi
+    say "Nessun aggiornamento disponibile."
+    exit 1
+fi
+
+# --- Elevazione -------------------------------------------------------------
+# In un terminale interattivo doas/sudo possono chiedere la password. Da DMS
+# (o da qualunque contesto grafico senza TTY) invece non hanno dove mostrarla e
+# fallirebbero in silenzio: lì serve pkexec, che usa l'agente polkit del
+# desktop. Ordine: root -> TTY con doas/sudo -> pkexec -> errore esplicito.
+if [ "$(id -u)" -ne 0 ]; then
+    if [ -t 0 ] && [ -t 1 ]; then
+        if command -v doas >/dev/null 2>&1; then
+            exec doas "$SELF" "$@"
+        elif command -v sudo >/dev/null 2>&1; then
+            exec sudo "$SELF" "$@"
+        fi
+    fi
+    if command -v pkexec >/dev/null 2>&1; then
+        exec pkexec "$SELF" "$@"
+    fi
+    die "servono i privilegi di root: esegui da un terminale (doas/sudo) o installa pkexec"
+fi
+
+mkdir -p "$LOG_DIR" "$STATE_DIR" || die "impossibile creare $LOG_DIR"
+touch "$LOG" || die "impossibile scrivere $LOG"
+
+# Un solo aggiornamento alla volta: due xbps in parallelo bloccano il database.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"/run/hyleos-update.lock" 2>/dev/null || exec 9>/tmp/hyleos-update.lock
+    if ! flock -n 9; then
+        die "un altro aggiornamento è già in corso"
+    fi
+fi
+
+run_step() {
+    local desc="$1"; shift
+    say ""
+    say "==> $desc"
+    say "    \$ $*"
+    if [ "$DO_DRY" -eq 1 ]; then
+        return 0
+    fi
+    "$@" 2>&1 | tee -a "$LOG"
+    local rc=${PIPESTATUS[0]}
+    if [ "$rc" -ne 0 ]; then
+        say "    [!] comando fallito (exit $rc)" | tee -a "$LOG" >&2
+        return "$rc"
+    fi
+    return 0
+}
+
+pkgver() {
+    xbps-query -p pkgver "$1" 2>/dev/null || true
+}
+
+# --- Preflight --------------------------------------------------------------
+say "HyleOS — aggiornamento di sistema"
+say "Log: $LOG"
+say "Data: $(date -Is)"
+
+# Rete: senza repo raggiungibile xbps fallisce a metà transazione.
+if [ "${HYLEOS_SKIP_NET_CHECK:-0}" != "1" ]; then
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -fsSI --max-time 10 "$REPO_URL" >/dev/null 2>&1; then
+            die "repository non raggiungibile ($REPO_URL). Controlla la connessione e riprova."
+        fi
+    elif command -v ping >/dev/null 2>&1; then
+        ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1 \
+            || die "nessuna connessione di rete. Controlla il Wi-Fi e riprova."
+    fi
+    say "Rete: OK"
+fi
+
+# Spazio: un aggiornamento con kernel+mesa può richiedere qualche GB.
+free_mb="$(df -Pk / | awk 'NR==2 {print $4}')"
+if [ -n "$free_mb" ] && [ "$free_mb" -lt "$MIN_FREE_MB" ]; then
+    die "spazio insufficiente su /: ${free_mb} MB liberi, servono almeno ${MIN_FREE_MB} MB. Esegui 'hyle clean' e riprova."
+fi
+say "Spazio su /: ${free_mb} MB liberi"
+
+# Versioni prima dell'aggiornamento (per capire se serve un riavvio).
+CORE_PKGS="linux hyprland quickshell dankmaterialshell dms mesa glibc xbps"
+before=""
+for p in $CORE_PKGS; do
+    v="$(pkgver "$p")"
+    [ -n "$v" ] && before="$before$p=$v"$'\n'
+done
+
+# --- Aggiornamento ----------------------------------------------------------
+if ! run_step "Aggiornamento di xbps (il package manager stesso)" xbps-install -uy xbps; then
+    die "aggiornamento di xbps fallito. Log: $LOG"
+fi
+
+if ! run_step "Aggiornamento del sistema (xbps-install -Suy)" xbps-install -Suy; then
+    say ""
+    say "L'aggiornamento non è andato a buon fine." >&2
+    say "Suggerimento: esegui 'hyle repair' per sbloccare il database e riprovare." >&2
+    say "Log completo: $LOG" >&2
+    exit 1
+fi
+
+# --- Pulizia kernel ---------------------------------------------------------
+if [ -x "$KERNEL_CLEANUP" ]; then
+    run_step "Pulizia kernel (mantengo almeno gli ultimi 2)" "$KERNEL_CLEANUP" || true
+fi
+
+# --- Riavvio necessario? ----------------------------------------------------
+reboot_needed=0
+changed=""
+for p in $CORE_PKGS; do
+    old="$(printf '%s' "$before" | sed -n "s/^$p=//p")"
+    new="$(pkgver "$p")"
+    if [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ]; then
+        changed="$changed$p: $old -> $new"$'\n'
+        reboot_needed=1
+    fi
+done
+
+say ""
+if [ "$DO_DRY" -eq 1 ]; then
+    say "[dry-run] nessuna modifica a $REBOOT_FLAG."
+elif [ "$reboot_needed" -eq 1 ]; then
+    {
+        say "RIAVVIO RICHIESTO"
+        say "Componenti aggiornati:"
+        printf '%s' "$changed"
+        say "Aggiornato il: $(date -Is)"
+    } | tee -a "$LOG" > "$REBOOT_FLAG"
+    chmod 644 "$REBOOT_FLAG"
+    say "=============================================="
+    say "  RIAVVIA PER COMPLETARE L'AGGIORNAMENTO"
+    say "=============================================="
+    say "Sono cambiati kernel o componenti core:"
+    printf '%s' "$changed" | sed 's/^/  - /'
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u normal -i system-reboot "HyleOS" "Aggiornamento completato: riavvia per applicare kernel e componenti core." 2>/dev/null || true
+    fi
+else
+    rm -f "$REBOOT_FLAG"
+    say "Aggiornamento completato. Nessun riavvio necessario."
+fi
+
+say ""
+say "Log completo: $LOG"
+exit 0

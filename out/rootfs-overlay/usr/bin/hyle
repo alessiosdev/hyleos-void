@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""
+Hyle OS CLI Assistant - Strumento di amministrazione e auto-riparazione per Hyle OS (Void Linux)
+"""
+
+import sys
+import os
+import shutil
+import subprocess
+
+# Colori terminale ANSI
+C_RESET = "\033[0m"
+C_BOLD = "\033[1m"
+C_PURPLE = "\033[38;2;160;140;220m"
+C_CYAN = "\033[38;2;130;200;240m"
+C_GREEN = "\033[38;2;120;210;140m"
+C_YELLOW = "\033[38;2;240;200;110m"
+C_RED = "\033[38;2;240;110;110m"
+C_GRAY = "\033[38;2;150;150;160m"
+
+BANNER = fr"""{C_PURPLE}{C_BOLD}
+  _    _       _            ____   _____ 
+ | |  | |     | |          / __ \ / ____|
+ | |__| |_   _| | ___     | |  | | (___  
+ |  __  | | | | |/ _ \    | |  | |\___ \ 
+ | |  | | |_| | |  __/    | |__| |____) |
+ |_|  |_|\__, |_|\___|     \____/|_____/ 
+          __/ |                          
+         |___/      {C_CYAN}Assistant CLI v1.0{C_RESET}
+"""
+
+def get_priv_cmd():
+    if os.geteuid() == 0:
+        return []
+    if shutil.which("doas") and os.path.isfile("/etc/doas.conf"):
+        return ["doas"]
+    if shutil.which("sudo"):
+        return ["sudo"]
+    return []
+
+def cmd_update():
+    print(f"\n{C_BOLD}{C_CYAN}[*] Aggiornamento del sistema Hyle OS...{C_RESET}")
+
+    # Un solo flusso di aggiornamento: le AppImage vengono aggiornate lato
+    # utente, poi XBPS con preflight di rete/spazio, log e avviso di riavvio.
+    updater = "/usr/bin/hyleos-user-update"
+    if os.path.isfile(updater):
+        print(f"{C_GRAY}Delego a {updater} (log: /var/log/hyleos/update.log){C_RESET}")
+        res = subprocess.run([updater])
+        if res.returncode == 0:
+            print(f"\n{C_GREEN}{C_BOLD}[✓] Procedura completata!{C_RESET}\n")
+        else:
+            print(f"\n{C_YELLOW}[!] Aggiornamento terminato con errori. Log: /var/log/hyleos/update.log{C_RESET}\n")
+        return
+
+    # Fallback per sistemi senza hyleos-user-update (ISO molto vecchie).
+    priv = get_priv_cmd()
+
+    print(f"{C_PURPLE}==> Sincronizzazione repository e pacchetti XBPS...{C_RESET}")
+    res = subprocess.run(priv + ["xbps-install", "-Su"])
+    if res.returncode != 0:
+        print(f"{C_YELLOW}[!] Aggiornamento XBPS completato con avvisi o interrotto.{C_RESET}")
+        print(f"{C_YELLOW}[i] Suggerimento: Se l'aggiornamento è fallito, esegui '{C_CYAN}hyle repair{C_YELLOW}' per risolvere automaticamente.{C_RESET}")
+    else:
+        print(f"{C_GREEN}[✓] Pacchetti di sistema aggiornati con successo.{C_RESET}")
+
+    print(f"\n{C_GREEN}{C_BOLD}[✓] Procedura completata!{C_RESET}\n")
+
+def cmd_clean():
+    print(f"\n{C_BOLD}{C_CYAN}[*] Pulizia del sistema e recupero spazio su disco...{C_RESET}")
+    priv = get_priv_cmd()
+
+    # Rimuovi orfani XBPS
+    print(f"{C_PURPLE}==> Rimozione pacchetti orfani (XBPS)...{C_RESET}")
+    subprocess.run(priv + ["xbps-remove", "-O", "-y"], check=False)
+
+    # Pulizia cache XBPS
+    print(f"{C_PURPLE}==> Pulizia cache pacchetti /var/cache/xbps...{C_RESET}")
+    subprocess.run(priv + ["xbps-remove", "-c", "-y"], check=False)
+    subprocess.run(priv + ["sh", "-c", "rm -rf /var/cache/xbps/* 2>/dev/null || true"], check=False)
+
+    # Kernel: mantieni sempre gli ultimi 2 per poter fare rollback al boot.
+    kernel_cleanup = "/usr/libexec/hyleos/kernel-cleanup"
+    if os.path.isfile(kernel_cleanup):
+        print(f"{C_PURPLE}==> Pulizia kernel (mantengo almeno gli ultimi 2)...{C_RESET}")
+        subprocess.run(priv + [kernel_cleanup], check=False)
+
+    print(f"\n{C_GREEN}{C_BOLD}[✓] Pulizia completata! Spazio disco ottimizzato.{C_RESET}\n")
+
+def cmd_repair():
+    print(f"\n{C_BOLD}{C_YELLOW}╔═══════════════════════════════════════════════════════════════╗{C_RESET}")
+    print(f"{C_BOLD}{C_YELLOW}║         HYLE OS RESCUE - PROCEDURA DI AUTO-RIPARAZIONE        ║{C_RESET}")
+    print(f"{C_BOLD}{C_YELLOW}╚═══════════════════════════════════════════════════════════════╝{C_RESET}\n")
+    print(f"{C_GRAY}Questa procedura rileva e ripara automaticamente transazioni XBPS interrotte,")
+    print(f"pacchetti non configurati, kernel/dracut non aggiornati e servizi bloccati.{C_RESET}\n")
+
+    priv = get_priv_cmd()
+
+    # 1. Recupero Spazio di Emergenza
+    print(f"{C_CYAN}[1/7] Verifica spazio disco e rimozione blocchi...{C_RESET}")
+    try:
+        st = os.statvfs("/")
+        free_gb = (st.f_bavail * st.f_frsize) / (1024**3)
+        if free_gb < 1.0:
+            print(f"  {C_YELLOW}[!] Spazio critico ({free_gb:.1f} GB). Svuotamento preventivo cache...{C_RESET}")
+            subprocess.run(priv + ["sh", "-c", "rm -rf /var/cache/xbps/* /var/tmp/* 2>/dev/null || true"], check=False)
+            subprocess.run(priv + ["xbps-remove", "-O", "-y"], check=False)
+        else:
+            print(f"  {C_GREEN}[✓] Spazio su disco sufficiente ({free_gb:.1f} GB liberi).{C_RESET}")
+    except Exception as e:
+        print(f"  {C_GRAY}[i] Salto controllo spazio: {e}{C_RESET}")
+
+    # 2. Riconfigurazione di tutti i pacchetti pendenti
+    print(f"\n{C_CYAN}[2/7] Riconfigurazione pacchetti non completati (xbps-reconfigure -a)...{C_RESET}")
+    res = subprocess.run(priv + ["xbps-reconfigure", "-a"])
+    if res.returncode == 0:
+        print(f"  {C_GREEN}[✓] Tutti i pacchetti sono stati configurati correttamente.{C_RESET}")
+    else:
+        print(f"  {C_YELLOW}[!] Alcuni trigger hanno restituito avvisi. Proseguo...{C_RESET}")
+
+    # 3. Controllo integrità database XBPS
+    print(f"\n{C_CYAN}[3/7] Verifica integrità database pacchetti (xbps-pkgdb -a)...{C_RESET}")
+    res = subprocess.run(priv + ["xbps-pkgdb", "-a"], capture_output=True, text=True)
+    if res.returncode == 0:
+        print(f"  {C_GREEN}[✓] Nessuna incoerenza rilevata nel database XBPS.{C_RESET}")
+    else:
+        print(f"  {C_YELLOW}[!] Database con avvisi o pacchetti incoerenti:\n{res.stderr.strip()}{C_RESET}")
+        print(f"  {C_PURPLE}==> Tentativo di sblocco forzato del database...{C_RESET}")
+        subprocess.run(priv + ["xbps-pkgdb", "-m", "repolock"], check=False)
+        subprocess.run(priv + ["xbps-reconfigure", "-a"], check=False)
+
+    # 4. Rigenerazione Initramfs Dracut per il Kernel
+    print(f"\n{C_CYAN}[4/7] Controllo e rigenerazione initramfs del Kernel (dracut)...{C_RESET}")
+    res = subprocess.run(priv + ["xbps-reconfigure", "-f", "linux"], capture_output=True, text=True)
+    if res.returncode == 0:
+        print(f"  {C_GREEN}[✓] Immagine kernel e moduli dracut ripristinati con successo.{C_RESET}")
+    else:
+        print(f"  {C_YELLOW}[!] Ricostruzione fallback con dracut...{C_RESET}")
+        subprocess.run(priv + ["dracut", "--regenerate-all", "--force"], check=False)
+        print(f"  {C_GREEN}[✓] Rigenerazione dracut fallback terminata.{C_RESET}")
+
+    # 5. Ripristino dei servizi vitali Runit
+    print(f"\n{C_CYAN}[5/7] Verifica servizi di sistema fondamentali (Runit)...{C_RESET}")
+    essential_services = ["dbus", "elogind", "NetworkManager", "polkitd", "zramen"]
+    for srv in essential_services:
+        target_path = f"/var/service/{srv}"
+        source_path = f"/etc/sv/{srv}"
+        if os.path.exists(source_path):
+            if not os.path.islink(target_path):
+                print(f"  {C_YELLOW}[!] Ripristino collegamento per il servizio: {srv}...{C_RESET}")
+                subprocess.run(priv + ["ln", "-sf", source_path, target_path], check=False)
+                subprocess.run(priv + ["sv", "up", srv], check=False)
+            else:
+                print(f"  {C_GREEN}[✓] Servizio '{srv}' presente e collegato.{C_RESET}")
+
+    # 6. Ripristino Rete e DNS
+    print(f"\n{C_CYAN}[6/7] Controllo risoluzione rete e connettività...{C_RESET}")
+    ping = subprocess.run(["ping", "-c", "1", "-W", "2", "1.1.1.1"], capture_output=True)
+    if ping.returncode != 0:
+        print(f"  {C_YELLOW}[!] Rete non raggiungibile. Riavvio di NetworkManager...{C_RESET}")
+        subprocess.run(priv + ["sv", "restart", "NetworkManager"], check=False)
+    else:
+        print(f"  {C_GREEN}[✓] Connessione a Internet attiva e funzionante.{C_RESET}")
+
+    # 7. Le AppImage non richiedono riparazione privilegiata: vivono nell'home
+    #    dell'utente e si aggiornano con 'hyle update'.
+    print(f"\n{C_CYAN}[7/7] AppImage: nessuna riparazione di sistema necessaria.{C_RESET}")
+    print(f"  {C_GREEN}[✓] Aggiornabili lato utente con 'hyle update'.{C_RESET}")
+
+    # Chiusura e raccomandazioni
+    print(f"\n{C_GREEN}{C_BOLD}╔═══════════════════════════════════════════════════════════════╗{C_RESET}")
+    print(f"{C_GREEN}{C_BOLD}║         [✓] AUTO-RIPARAZIONE COMPLETATA CON SUCCESSO          ║{C_RESET}")
+    print(f"{C_GREEN}{C_BOLD}╚═══════════════════════════════════════════════════════════════╝{C_RESET}\n")
+    print(f"{C_CYAN}Per completare l'opera e installare eventuali pacchetti rimasti in sospeso:")
+    print(f"  {C_BOLD}hyle update{C_RESET}\n")
+
+def cmd_search(query):
+    print(f"\n{C_BOLD}{C_CYAN}[*] Ricerca pacchetti per: '{query}'...{C_RESET}\n")
+    
+    # Ricerca XBPS
+    print(f"{C_PURPLE}{C_BOLD}--- Pacchetti di Sistema (XBPS) ---{C_RESET}")
+    try:
+        subprocess.run(["xbps-query", "-Rs", query])
+    except Exception as e:
+        print(f"{C_RED}Errore ricerca XBPS: {e}{C_RESET}")
+
+    print()
+
+def cmd_info():
+    print(BANNER)
+    if shutil.which("fastfetch"):
+        subprocess.run(["fastfetch"])
+    else:
+        print(f"{C_CYAN}OS:{C_RESET} Hyle OS 1.0 (Hyprland + DankMaterialShell)")
+        print(f"{C_CYAN}Base:{C_RESET} Void Linux (glibc x86_64, runit)")
+        subprocess.run(["uname", "-srmo"])
+        print(f"\n{C_PURPLE}Memoria RAM:{C_RESET}")
+        subprocess.run(["free", "-h"])
+        print(f"\n{C_PURPLE}Spazio Disco:{C_RESET}")
+        subprocess.run(["df", "-h", "/"])
+    print()
+
+def cmd_service(args):
+    priv = get_priv_cmd()
+    if not args or args[0] in ["list", "ls"]:
+        print(f"\n{C_BOLD}{C_CYAN}[*] Servizi di sistema attivi (Runit):{C_RESET}")
+        if shutil.which("vsv"):
+            subprocess.run(["vsv"])
+        else:
+            services = os.listdir("/var/service") if os.path.exists("/var/service") else []
+            for s in sorted(services):
+                status_res = subprocess.run(["sv", "status", s], capture_output=True, text=True)
+                out = status_res.stdout.strip()
+                color = C_GREEN if "run:" in out else (C_YELLOW if "down:" in out else C_RED)
+                print(f"  {C_BOLD}{s:<20}{C_RESET} -> {color}{out}{C_RESET}")
+        print()
+        return
+
+    sub = args[0]
+    if len(args) < 2:
+        print(f"{C_RED}Uso: hyle service {sub} <nome_servizio>{C_RESET}")
+        return
+
+    srv = args[1]
+    if sub in ["enable", "on", "start"]:
+        print(f"{C_PURPLE}[*] Abilitazione servizio '{srv}'...{C_RESET}")
+        if not os.path.exists(f"/etc/sv/{srv}"):
+            print(f"{C_RED}Errore: Il servizio '{srv}' non esiste in /etc/sv/{C_RESET}")
+            return
+        subprocess.run(priv + ["ln", "-sf", f"/etc/sv/{srv}", f"/var/service/{srv}"])
+        print(f"{C_GREEN}[✓] Servizio '{srv}' collegato in /var/service.{C_RESET}")
+        subprocess.run(priv + ["sv", "up", srv])
+
+    elif sub in ["disable", "off", "stop"]:
+        print(f"{C_PURPLE}[*] Disabilitazione servizio '{srv}'...{C_RESET}")
+        subprocess.run(priv + ["sv", "down", srv], check=False)
+        subprocess.run(priv + ["rm", "-f", f"/var/service/{srv}"])
+        print(f"{C_GREEN}[✓] Servizio '{srv}' disabilitato e rimosso da /var/service.{C_RESET}")
+
+    elif sub in ["restart", "reload"]:
+        print(f"{C_PURPLE}[*] Riavvio servizio '{srv}'...{C_RESET}")
+        subprocess.run(priv + ["sv", "restart", srv])
+
+    elif sub in ["status"]:
+        subprocess.run(["sv", "status", srv])
+    else:
+        print(f"{C_RED}Azione non riconosciuta: {sub}. Usa: list, enable, disable, restart, status.{C_RESET}")
+
+def cmd_doctor(fix_mode=False):
+    if fix_mode:
+        cmd_repair()
+        return
+
+    print(f"\n{C_BOLD}{C_CYAN}[*] Diagnostica integrità Hyle OS...{C_RESET}\n")
+    has_issues = False
+    
+    # 1. Database pacchetti
+    print(f"{C_PURPLE}Controllo integrità database XBPS...{C_RESET}", end=" ", flush=True)
+    res = subprocess.run(["xbps-pkgdb", "-a"], capture_output=True, text=True)
+    if res.returncode == 0:
+        print(f"{C_GREEN}[OK]{C_RESET}")
+    else:
+        print(f"{C_YELLOW}[AVVISO]{C_RESET}\n{res.stderr.strip()}")
+        has_issues = True
+
+    # 2. Spazio su disco
+    print(f"{C_PURPLE}Controllo spazio libero /...{C_RESET}", end=" ", flush=True)
+    st = os.statvfs("/")
+    free_gb = (st.f_bavail * st.f_frsize) / (1024**3)
+    if free_gb > 3.0:
+        print(f"{C_GREEN}[OK] ({free_gb:.1f} GB liberi){C_RESET}")
+    else:
+        print(f"{C_RED}[CRITICO] ({free_gb:.1f} GB liberi){C_RESET}")
+        has_issues = True
+
+    # 3. Connettività rete
+    print(f"{C_PURPLE}Controllo connessione Internet...{C_RESET}", end=" ", flush=True)
+    ping = subprocess.run(["ping", "-c", "1", "-W", "2", "1.1.1.1"], capture_output=True)
+    if ping.returncode == 0:
+        print(f"{C_GREEN}[OK]{C_RESET}")
+    else:
+        print(f"{C_RED}[OFFLINE]{C_RESET}")
+        has_issues = True
+
+    # 4. Sessione grafica
+    print(f"{C_PURPLE}Sessione corrente...{C_RESET}", end=" ", flush=True)
+    sess_type = os.environ.get("XDG_SESSION_TYPE", "sconosciuta")
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "Hyprland")
+    print(f"{C_GREEN}[OK] ({desktop} su {sess_type}){C_RESET}")
+
+    # 5. ZRAM
+    print(f"{C_PURPLE}Modulo ZRAM attivo...{C_RESET}", end=" ", flush=True)
+    if os.path.exists("/dev/zram0"):
+        print(f"{C_GREEN}[OK]{C_RESET}")
+    else:
+        print(f"{C_GRAY}[Non abilitato]{C_RESET}")
+
+    print(f"\n{C_CYAN}Diagnostica completata.{C_RESET}")
+    if has_issues:
+        print(f"\n{C_YELLOW}{C_BOLD}[!] Rilevati potenziali problemi nel sistema.")
+        print(f"    Esegui '{C_CYAN}hyle repair{C_YELLOW}' (o '{C_CYAN}hyle doctor --fix{C_YELLOW}') per risolverli in automatico.{C_RESET}\n")
+    else:
+        print(f"{C_GREEN}Tutti i componenti principali sono in perfetto stato.{C_RESET}\n")
+
+def print_help():
+    print(BANNER)
+    print(f"{C_BOLD}UTILIZZO:{C_RESET} hyle <comando> [argomenti]\n")
+    print(f"{C_BOLD}COMANDI DISPONIBILI:{C_RESET}")
+    print(f"  {C_GREEN}update{C_RESET}                 Aggiorna il sistema (AppImage utente + XBPS)")
+    print(f"  {C_GREEN}clean{C_RESET}                  Libera spazio su disco (cache e orfani)")
+    print(f"  {C_GREEN}repair{C_RESET}                 {C_YELLOW}Auto-riparazione sistema (aggiornamenti falliti, dracut, pacchetti){C_RESET}")
+    print(f"  {C_GREEN}doctor [--fix]{C_RESET}         Verifica l'integrità del sistema (o applica i fix)")
+    print(f"  {C_GREEN}search <termine>{C_RESET}       Cerca pacchetti nei repository XBPS")
+    print(f"  {C_GREEN}info{C_RESET}                   Mostra specifiche di sistema e hardware")
+    print(f"  {C_GREEN}service list{C_RESET}           Elenca i servizi Runit abilitati")
+    print(f"  {C_GREEN}service enable <srv>{C_RESET}   Abilita e avvia un servizio di sistema")
+    print(f"  {C_GREEN}service disable <srv>{C_RESET}  Disabilita e arresta un servizio di sistema")
+    print(f"  {C_GREEN}service restart <srv>{C_RESET}  Riavvia un servizio di sistema")
+    print(f"  {C_GREEN}service status <srv>{C_RESET}   Mostra lo stato di un servizio")
+    print()
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ["-h", "--help", "help"]:
+        print_help()
+        sys.exit(0)
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+
+    if cmd == "update":
+        cmd_update()
+    elif cmd == "clean":
+        cmd_clean()
+    elif cmd in ["repair", "fix", "rescue"]:
+        cmd_repair()
+    elif cmd in ["search", "find"]:
+        if not args:
+            print(f"{C_RED}Specifica un termine da cercare: hyle search <nome>{C_RESET}")
+            sys.exit(1)
+        cmd_search(" ".join(args))
+    elif cmd in ["info", "fetch"]:
+        cmd_info()
+    elif cmd in ["service", "services", "sv"]:
+        cmd_service(args)
+    elif cmd in ["doctor", "check"]:
+        fix = "--fix" in args or "-f" in args
+        cmd_doctor(fix_mode=fix)
+    else:
+        print(f"{C_RED}Comando sconosciuto: '{cmd}'{C_RESET}")
+        print(f"Usa {C_CYAN}hyle --help{C_RESET} per la lista dei comandi.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

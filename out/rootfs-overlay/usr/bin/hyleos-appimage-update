@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""hyleos-appimage-update — aggiorna le AppImage installate dall'utente.
+
+Gira sempre come utente normale: nessuna elevazione di privilegi e nessuna
+scrittura fuori da ``~/Applications``, ``~/.local/share`` e ``~/.local/state``.
+Il download, la verifica SHA256, la sostituzione atomica e l'aggiornamento di
+file .desktop e icone sono delegati a ``/usr/share/hyleos/appimage_backend.py``.
+
+Uso:
+  hyleos-appimage-update          aggiorna le AppImage che hanno una versione
+                                  diversa da quella del catalogo
+  hyleos-appimage-update --check   stampa solo gli aggiornamenti disponibili
+  hyleos-appimage-update --yes     accetta senza chiedere (sempre non interattivo)
+  hyleos-appimage-update --force   forza anche downgrade o versioni non confrontabili
+"""
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sys
+
+BACKEND = "/usr/share/hyleos/appimage_backend.py"
+
+
+def load_backend():
+    """Carica il backend dalla posizione di sistema senza importare lo Store."""
+    loader = importlib.machinery.SourceFileLoader("hyleos_appimage_backend", BACKEND)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def parse_args(argv):
+    check_only = False
+    force = False
+    for arg in argv:
+        if arg == "--check":
+            check_only = True
+        elif arg in ("--yes", "-y"):
+            pass  # Lo script non pone domande: il flag è solo compatibilità.
+        elif arg in ("--force", "-f"):
+            force = True
+        elif arg in ("-h", "--help"):
+            print(__doc__.strip())
+            return None
+        else:
+            print("Opzione non riconosciuta, ignorata: %s" % arg)
+    return check_only, force
+
+
+def read_manifest(backend):
+    """Legge lo stato installato; un file assente equivale a nessuna AppImage."""
+    path = backend.manifest_path()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("stato AppImage non leggibile (%s): %s" % (path, exc)) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("apps"), dict):
+        raise ValueError("stato AppImage non valido: %s" % path)
+    return data["apps"]
+
+
+def _version_key(version):
+    """Converte una versione in una tupla di interi, per confronto numerico."""
+    return tuple(int(part) for part in re.findall(r"\d+", str(version)))
+
+
+def find_updates(catalog, manifest, force=False):
+    """Restituisce (id, vecchia, nuova, voce) per le AppImage da aggiornare."""
+    by_id = {entry["id"]: entry for entry in catalog}
+    updates = []
+    for app_id in sorted(manifest):
+        entry = by_id.get(app_id)
+        if entry is None:
+            continue  # App installata a mano o rimossa dal catalogo: non toccata.
+        old = str(manifest[app_id].get("version", "")).strip()
+        new = str(entry.get("version", "")).strip()
+        if not new or old == new:
+            continue
+        old_key = _version_key(old)
+        new_key = _version_key(new)
+        comparable = bool(old_key) and bool(new_key)
+        if comparable and new_key > old_key:
+            updates.append((app_id, old, new, entry))
+            continue
+        if force:
+            updates.append((app_id, old, new, entry))
+            continue
+        name = entry.get("name", app_id)
+        if not comparable:
+            print(
+                "Avviso: versioni non confrontabili per %s (%s -> %s), "
+                "aggiornamento saltato (usa --force per forzare)." % (name, old, new)
+            )
+        else:
+            print(
+                "Avviso: versione del catalogo non superiore per %s (%s -> %s), "
+                "aggiornamento saltato (usa --force per forzare)." % (name, old, new)
+            )
+    return updates
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args is None:
+        return 0
+    check_only, force = args
+
+    try:
+        backend = load_backend()
+    except Exception as exc:
+        print("Errore: backend AppImage non disponibile: %s" % exc)
+        return 1
+
+    try:
+        catalog = backend.load_catalog()
+        manifest = read_manifest(backend)
+        updates = find_updates(catalog, manifest, force)
+    except Exception as exc:
+        print("Errore: %s" % exc)
+        return 1
+
+    if not updates:
+        print("Nessun aggiornamento AppImage disponibile.")
+        return 0
+
+    if check_only:
+        print("Aggiornamenti AppImage disponibili:")
+        for _app_id, old, new, entry in updates:
+            print("  - %s: %s -> %s" % (entry.get("name", _app_id), old or "sconosciuta", new))
+        return 0
+
+    failed = 0
+    for _app_id, old, new, entry in updates:
+        name = entry.get("name", _app_id)
+        print("Aggiornamento di %s (%s -> %s)..." % (name, old or "sconosciuta", new))
+        if force:
+            print("  Aggiornamento forzato: proseguo comunque.")
+        try:
+            backend.install(entry)
+        except Exception as exc:
+            print("Errore: aggiornamento di %s non riuscito: %s" % (name, exc))
+            failed += 1
+        else:
+            print("  %s aggiornata." % name)
+
+    if failed:
+        print("Aggiornamento AppImage completato con %d errori." % failed)
+        return 1
+    print("AppImage aggiornate.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
