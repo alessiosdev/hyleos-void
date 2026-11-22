@@ -5,7 +5,7 @@ revision=3
 short_desc="HyleOS - assistente CLI (update, clean, repair) e benvenuto"
 maintainer="Hyle OS Team"
 license="MIT"
-homepage="https://hyleos.org"
+homepage="https://github.com/alessiosdev/hyleos-void"
 
 depends="
   python3

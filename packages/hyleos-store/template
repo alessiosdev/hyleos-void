@@ -5,7 +5,7 @@ revision=5
 short_desc="HyleOS Store - app desktop via XBPS e AppImage utente"
 maintainer="Hyle OS Team"
 license="MIT"
-homepage="https://hyleos.org"
+homepage="https://github.com/alessiosdev/hyleos-void"
 
 depends="
   python3

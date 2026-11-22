@@ -1,8 +1,13 @@
 # HyleOS
 
-Distribuzione desktop basata su **Void Linux** con **Hyprland** (configurazione in
-Lua) e **DankMaterialShell** (DMS) come shell grafica. Include un installer
-grafico UEFI, uno store applicazioni basato su XBPS e AppImage e un sistema di
+**Stato: Beta 1.0** — la ISO live e il repository XBPS sono in fase di collaudo;
+vedi la sezione [Stato del progetto](#stato-del-progetto) prima di usarlo su un
+dispositivo di produzione.
+
+Distribuzione desktop basata su **Void Linux** (init **runit**) con **Hyprland
+0.57** (configurazione in Lua) e **DankMaterialShell** (DMS) come shell grafica.
+Include un installer grafico UEFI, uno store applicazioni basato su XBPS e
+AppImage (`hyleos-store`), un installer GTK4 (`hyleos-installer`) e un sistema di
 aggiornamenti firmati con repository proprio.
 
 > **Regola di fondo:** `out/rootfs-overlay/` è la fonte canonica. La ISO live e i
@@ -53,6 +58,27 @@ dopo un clone pulito va rigenerato prima di costruire.
 Il binario `out/rootfs-overlay/usr/bin/dms` (~73 MB, Go statico) è invece
 versionato di proposito, perché il pacchetto `hyleos-dms` lo installa; resta
 sotto il limite GitHub di 100 MB per file.
+
+## Stato del progetto
+
+Questa e' la **Beta 1.0**: la configurazione del desktop, lo Store e l'installer
+sono funzionanti, ma la ISO e il repository vengono ancora collaudati su hardware
+reale. Usa `./build/check-overlay.sh` e i test prima di ogni build; dopo una
+build verifica sempre l'integrita' dell'immagine (il gate `verify-image-integrity.sh`
+e' integrato in `mkiso.sh` e blocca la build se un file critico come `libicuuc`
+risulta corrotto). Segnala eventuali regressioni con un issue.
+
+Le build `build-repo.sh`, `e2e-installer.sh`, `canary.sh` e
+`verify-installed-system.sh` richiedono una macchina Void completa con
+`xbps-src`, QEMU/OVMF e spazio su disco; non girano in un ambiente minimale.
+
+## Requisiti hardware (per avviare la ISO)
+
+- Architettura **x86_64** con firmware **UEFI** (la ISO e' ibrida ma il flusso
+  supportato e' UEFI/GPT).
+- **Secure Boot disattivato**: le immagini non sono firmate con chiavi Microsoft.
+- Almeno 8 GB di spazio per la live USB e, per l'installazione, una GPT con ESP
+  FAT32 e root ext4 (gestite da `hyleos-installer`).
 
 ## Requisiti di build
 
@@ -185,8 +211,12 @@ Mouse:
 ## Test
 
 ```sh
-for t in tests/test_*.py; do python3 "$t"; done
+python3 -m unittest discover -s tests -q
 ```
+
+Comando consigliato: esegue l'intera suite in un'unica invocazione (157 test
+nell'ultima verifica). In alternativa, per singoli file:
+`for t in tests/test_*.py; do python3 "$t"; done`.
 
 Coprono migrazione configurazione, pulizia kernel, rilevamento disco live,
 coerenza packaging, firma repository, modalità finestre, backend XBPS e AppImage
@@ -201,8 +231,3 @@ dello store e flusso di aggiornamento utente/sistema.
 - [`docs/installer-disk-selection.md`](docs/installer-disk-selection.md) —
   selezione disco dell'installer.
 
-## Stato del progetto
-
-Beta. Le build `build-repo.sh`, `e2e-installer.sh`, `canary.sh` e
-`verify-installed-system.sh` richiedono una macchina Void completa con
-`xbps-src`, QEMU/OVMF e spazio su disco; non girano in un ambiente minimale.

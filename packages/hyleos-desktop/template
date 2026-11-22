@@ -9,7 +9,7 @@ revision=4
 short_desc="HyleOS - desktop Hyprland + DMS e default di sistema"
 maintainer="Hyle OS Team"
 license="MIT"
-homepage="https://hyleos.org"
+homepage="https://github.com/alessiosdev/hyleos-void"
 
 depends="
   hyleos-session>=1.0.0_1

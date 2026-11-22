@@ -5,7 +5,7 @@ revision=4
 short_desc="HyleOS - installer grafico (GTK4) per UEFI x86_64"
 maintainer="Hyle OS Team"
 license="MIT"
-homepage="https://hyleos.org"
+homepage="https://github.com/alessiosdev/hyleos-void"
 
 depends="
   python3
