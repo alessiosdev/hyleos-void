@@ -831,6 +831,7 @@ class ConfigureSystemJob(Job):
             _p(ctx, "etc", "sudoers.d", "99-void-live"),
             _p(ctx, "etc", "default", "live.conf"),
             _p(ctx, "etc", "polkit-1", "rules.d", "void-live.rules"),
+            _p(ctx, "usr", "share", "polkit-1", "rules.d", "50-hyleos-installer-live.rules"),
         ):
             ctx.run(["rm", "-f", path], check=False)
 

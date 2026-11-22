@@ -557,6 +557,18 @@ class DracutLiveNeutralizationTest(unittest.TestCase):
         self.assertNotIn(".orig", source)
 
 
+class LiveRuleCleanupTest(unittest.TestCase):
+    def test_live_installer_rule_is_in_the_live_file_cleanup_list(self):
+        source = inspect.getsource(jobs.ConfigureSystemJob._execute)
+        self.assertIn('_p(ctx, "etc", "polkit-1", "rules.d", "void-live.rules")', source)
+        self.assertIn(
+            '_p(ctx, "usr", "share", "polkit-1", "rules.d", '
+            '"50-hyleos-installer-live.rules")',
+            source,
+        )
+        self.assertIn('ctx.run(["rm", "-f", path], check=False)', source)
+
+
 def ast_parse(func):
     import ast
     import textwrap

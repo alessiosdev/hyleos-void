@@ -1,7 +1,7 @@
 # Ricetta xbps-src — hyleos-installer
 pkgname=hyleos-installer
 version=1.0.0
-revision=3
+revision=4
 short_desc="HyleOS - installer grafico (GTK4) per UEFI x86_64"
 maintainer="Hyle OS Team"
 license="MIT"
@@ -27,7 +27,6 @@ do_install() {
     vmkdir usr/share/hyleos
     vinstall ${FILESDIR}/share/hyleos/installer.py 644 usr/share/hyleos
     vcopy ${FILESDIR}/share/hyleos/installer usr/share/hyleos
-    vinstall ${FILESDIR}/applications/hyleos-installer.desktop 644 usr/share/applications
     vinstall ${FILESDIR}/applications/org.hyleos.installer.desktop 644 usr/share/applications
     vinstall ${FILESDIR}/polkit/org.hyleos.installer.policy 644 usr/share/polkit-1/actions
     vinstall ${FILESDIR}/polkit/50-hyleos-installer-live.rules 644 usr/share/polkit-1/rules.d

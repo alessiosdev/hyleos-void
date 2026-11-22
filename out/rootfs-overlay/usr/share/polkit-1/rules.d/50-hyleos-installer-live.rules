@@ -1,10 +1,10 @@
-// Nella ISO live l'utente "anon" esiste e può avviare l'installer senza
-// digitare la password. Dopo l'installazione "anon" viene rimosso: la regola
-// diventa inerte sul sistema installato, dove resta auth_admin.
+// Solo nella ISO live l'utente "anon" avvia l'installer senza password: non
+// serve che la sessione risulti attiva, perche' nella live puo' non esserlo.
+// Dopo l'installazione l'installer rimuove l'utente "anon": la regola resta
+// inerte sul sistema installato, dove valgono i defaults auth_admin.
 polkit.addRule(function(action, subject) {
     if (action.id == "org.hyleos.installer.launch" &&
         subject.user() == "anon" &&
-        subject.active &&
         subject.local) {
         return polkit.Result.YES;
     }

@@ -55,7 +55,6 @@ mkdir -p "$F/bin" "$F/share/hyleos" "$F/applications" "$F/polkit"
 copy usr/bin/hyleos-installer "$F/bin/hyleos-installer"
 copy usr/share/hyleos/installer.py "$F/share/hyleos/installer.py"
 copy usr/share/hyleos/installer "$F/share/hyleos/installer"
-copy usr/share/applications/hyleos-installer.desktop "$F/applications/hyleos-installer.desktop"
 copy usr/share/applications/org.hyleos.installer.desktop "$F/applications/org.hyleos.installer.desktop"
 copy usr/share/polkit-1/actions/org.hyleos.installer.policy \
      "$F/polkit/org.hyleos.installer.policy"

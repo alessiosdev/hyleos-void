@@ -58,14 +58,36 @@ while [ "$DONE_ARG" -lt "$TOTAL" ]; do
     esac
 done
 
+LAUNCH_LOG=/tmp/hyleos-installer-launch.log
+
+log_launch() {
+    printf '%s rc=%s argv=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" "$2" >> "$LAUNCH_LOG"
+    if [ "$1" -ne 0 ]; then
+        echo "Avvio dell'installer fallito (codice $1): $2. Dettagli in $LAUNCH_LOG" >&2
+    fi
+}
+
+LOG_ARGS=""
+for NAME in WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE HYPRLAND_INSTANCE_SIGNATURE DISPLAY XAUTHORITY; do
+    LOG_ARGS="$LOG_ARGS --hyleos-env $NAME=<redacted>"
+done
+ARG_COUNT=$#
+LOG_ARGS="$LOG_ARGS args=$ARG_COUNT"
+
 if [ "$UID_NOW" -eq 0 ]; then
-    exec python3 "$PY" "$@"
+    # pkexec riesegue questo script come root: scrivere il log qui lo
+    # lascerebbe di proprieta' root:root in /tmp, impedendo l'append
+    # dell'utente non-root e aprendo un symlink attack. Il genitore pkexec
+    # registra gia' lo stesso codice di uscita.
+    python3 "$PY" "$@"
+    RC=$?
+    exit "$RC"
 fi
 
 if [ -t 0 ] && [ -t 1 ]; then
     # In terminale doas/sudo possono mostrare il prompt della password.
     if command -v doas >/dev/null 2>&1 && [ -f /etc/doas.conf ]; then
-        exec doas env \
+        doas env \
             WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
             XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
             DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
@@ -74,8 +96,11 @@ if [ -t 0 ] && [ -t 1 ]; then
             DISPLAY="${DISPLAY:-}" \
             XAUTHORITY="${XAUTHORITY:-}" \
             python3 "$PY" "$@"
+        RC=$?
+        log_launch "$RC" "doas $PY$LOG_ARGS"
+        exit "$RC"
     elif command -v sudo >/dev/null 2>&1; then
-        exec sudo env \
+        sudo env \
             WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
             XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
             DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
@@ -84,13 +109,19 @@ if [ -t 0 ] && [ -t 1 ]; then
             DISPLAY="${DISPLAY:-}" \
             XAUTHORITY="${XAUTHORITY:-}" \
             python3 "$PY" "$@"
+        RC=$?
+        log_launch "$RC" "sudo $PY$LOG_ARGS"
+        exit "$RC"
     fi
 fi
 
 # Senza TTY (o senza doas/sudo) serve pkexec, con il suo agente grafico.
 # pkexec "$SELF" (non "pkexec env ...") fa combaciare exec.path con la policy.
+WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
+XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+
 if command -v pkexec >/dev/null 2>&1; then
-    exec pkexec "$SELF" \
+    pkexec "$SELF" \
         --hyleos-env WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
         --hyleos-env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
         --hyleos-env DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
@@ -99,7 +130,11 @@ if command -v pkexec >/dev/null 2>&1; then
         --hyleos-env DISPLAY="$DISPLAY" \
         --hyleos-env XAUTHORITY="$XAUTHORITY" \
         "$@"
+    RC=$?
+    log_launch "$RC" "pkexec $SELF$LOG_ARGS"
+    exit "$RC"
 fi
 
 echo "Servono i privilegi di root. Eseguire da terminale (doas/sudo) o installare polkit." >&2
-exit 1
+log_launch 127 "pkexec-non-disponibile$LOG_ARGS"
+exit 127
