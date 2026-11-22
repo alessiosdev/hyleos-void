@@ -50,6 +50,103 @@ build_sentinel_list() {
     fi
 }
 
+relr_in_writable_segment() {
+    local addr="$1" vaddr_hex filesz_hex vaddr filesz
+    while read -r vaddr_hex filesz_hex; do
+        [ -n "$vaddr_hex" ] || continue
+        vaddr=$((16#${vaddr_hex#0x}))
+        filesz=$((16#${filesz_hex#0x}))
+        if [ "$addr" -ge "$vaddr" ] && [ "$addr" -lt "$((vaddr + filesz))" ]; then
+            return 0
+        fi
+    done < "$RELR_WRITABLE_SEGS"
+    return 1
+}
+
+check_relr() {
+    local file="$1" dyn="$2" relr relrsz relrent relr_dec off="" line
+    local p_off_hex p_vaddr_hex p_filesz_hex p_off p_vaddr p_filesz
+    local sec_off sec_size raw w high low a base=0 last=-1 count=0 have_base=0 j bit any count_words
+    local -a words=()
+    relr="$(printf '%s\n' "$dyn" | awk '/\(RELR\)/ { v=$NF; sub(/^0x/, "", v); print v; exit }')"
+    relrsz="$(printf '%s\n' "$dyn" | awk '/\(RELRSZ\)/ { for (i=NF; i>0; i--) if ($i ~ /^[0-9]+$/) { print $i; exit } }')"
+    relrent="$(printf '%s\n' "$dyn" | awk '/\(RELRENT\)/ { for (i=NF; i>0; i--) if ($i ~ /^[0-9]+$/) { print $i; exit } }')"
+    [ -n "$relr" ] && [[ "$relr" =~ ^[0-9a-fA-F]+$ ]] || die "DT_RELR assente o non valido su sentinella ELF: $file"
+    [ -n "$relrsz" ] && [[ "$relrsz" =~ ^[0-9]+$ ]] || die "DT_RELRSZ assente o non valido su sentinella ELF: $file"
+    [ -n "$relrent" ] || relrent=8
+    [[ "$relrent" =~ ^[0-9]+$ ]] && [ "$relrent" -eq 8 ] || die "DT_RELRENT diverso da 8 su sentinella ELF: $file"
+    [ "$relrsz" -gt 0 ] || die "DT_RELRSZ nullo su sentinella ELF: $file"
+    [ $((relrsz % relrent)) -eq 0 ] || die "DT_RELRSZ=$relrsz non multiplo di DT_RELRENT=$relrent su $file"
+    relr_dec=$((16#$relr))
+    [ "$relr_dec" -gt 0 ] && [ $((relr_dec % 8)) -eq 0 ] || die "DT_RELR non allineato a 8 su sentinella ELF: $file"
+
+    RELR_WRITABLE_SEGS="$TMPDIR_WORK/relr-writable-segs"
+    readelf -lW "$file" 2>/dev/null | awk '$1 == "LOAD" && $7 ~ /W/ { print $3, $5 }' > "$RELR_WRITABLE_SEGS" \
+        || die "readelf -lW fallito: $file"
+    while read -r p_off_hex p_vaddr_hex p_filesz_hex; do
+        [ -n "$p_off_hex" ] || continue
+        p_off=$((16#${p_off_hex#0x}))
+        p_vaddr=$((16#${p_vaddr_hex#0x}))
+        p_filesz=$((16#${p_filesz_hex#0x}))
+        if [ "$relr_dec" -ge "$p_vaddr" ] && [ "$relr_dec" -lt "$((p_vaddr + p_filesz))" ]; then
+            off=$((p_off + relr_dec - p_vaddr))
+            [ $((off + relrsz)) -le $((p_off + p_filesz)) ] || die "tabella RELR fuori dal segmento LOAD: $file"
+            break
+        fi
+    done < <(readelf -lW "$file" 2>/dev/null | awk '$1 == "LOAD" { print $2, $3, $5 }')
+    [ -n "$off" ] || die "DT_RELR non mappato in un segmento LOAD: $file"
+
+    line="$(readelf -SW "$file" 2>/dev/null | awk '$2 == ".relr.dyn" { print $5, $6 }')"
+    if [ -n "$line" ]; then
+        read -r sec_off sec_size <<< "$line"
+        [ $((16#${sec_off#0x})) -eq "$off" ] && [ $((16#${sec_size#0x})) -eq "$relrsz" ] \
+            || die ".relr.dyn non coerente con DT_RELR/DT_RELRSZ su $file"
+    fi
+
+    raw="$(od -An -tx8 -v -j "$off" -N "$relrsz" -- "$file")" || die "lettura tabella RELR fallita: $file"
+    words=($raw)
+    count_words=$((relrsz / relrent))
+    [ "${#words[@]}" -eq "$count_words" ] || die "tabella RELR troncata su $file"
+    for w in "${words[@]}"; do
+        [[ "$w" =~ ^[0-9a-fA-F]{16}$ ]] || die "voce RELR non decodificabile su $file: $w"
+        high=$((16#${w:0:8}))
+        low=$((16#${w:8:8}))
+        if [ $((low & 1)) -eq 0 ]; then
+            [ "$high" -lt 2147483648 ] || die "valore RELR spurio su $file: $w"
+            a=$((high * 4294967296 + low))
+            [ $((a % 8)) -eq 0 ] || die "indirizzo RELR non allineato a 8 su $file: $w"
+            relr_in_writable_segment "$a" || die "indirizzo RELR fuori segmento scrivibile su $file: $w"
+            [ "$a" -gt "$last" ] || die "indirizzi RELR non crescenti su $file: $w"
+            base=$((a + 8))
+            have_base=1
+            last=$a
+            count=$((count + 1))
+        else
+            [ "$have_base" -eq 1 ] || die "bitmap RELR senza indirizzo base su $file: $w"
+            any=0
+            for ((j = 0; j < 63; j++)); do
+                if [ "$j" -lt 31 ]; then
+                    bit=$(((low >> (j + 1)) & 1))
+                else
+                    bit=$(((high >> (j - 31)) & 1))
+                fi
+                if [ "$bit" -eq 1 ]; then
+                    a=$((base + j * 8))
+                    relr_in_writable_segment "$a" || die "indirizzo RELR fuori segmento scrivibile su $file: $w"
+                    [ "$a" -gt "$last" ] || die "indirizzi RELR non crescenti su $file: $w"
+                    last=$a
+                    count=$((count + 1))
+                    any=1
+                fi
+            done
+            [ "$any" -eq 1 ] || die "bitmap RELR vuota su $file: $w"
+            base=$((base + 504))
+        fi
+    done
+    [ "$count" -gt 0 ] || die "nessuna rilocazione RELR decodificata su $file"
+    log "OK ELF $file (DT_RELR, $count entries)"
+}
+
 check_elf_relocations() {
     local file="$1" dyn rel relacount
     if ! readelf -h "$file" >/dev/null 2>&1; then
@@ -58,13 +155,13 @@ check_elf_relocations() {
     dyn="$(readelf -d "$file" 2>/dev/null)" || die "readelf -d fallito: $file"
     relacount="$(printf '%s\n' "$dyn" | awk '/\(RELACOUNT\)/ { v=$NF; gsub(/[^0-9]/, "", v); print v; exit }')"
     if [ -z "$relacount" ] || ! [[ "$relacount" =~ ^[0-9]+$ ]] || [ "$relacount" -eq 0 ]; then
-        die "DT_RELACOUNT assente o nullo su sentinella ELF: $file"
+        check_relr "$file" "$dyn"
+        return 0
     fi
     rel="$(readelf -Wr "$file" 2>/dev/null)" || die "readelf -Wr fallito: $file"
     printf '%s\n' "$rel" | awk -v want="$relacount" -v file="$file" '
         BEGIN { inside = 0; total = 0; leading = 0; bad = -1 }
         /^Relocation section/ {
-            if (inside) exit
             inside = (index($0, ".rela.dyn") > 0)
             next
         }
