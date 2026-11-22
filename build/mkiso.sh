@@ -146,6 +146,47 @@ fi
 # Patch 3c: timestamp di ogni fase, per individuare i colli di bottiglia.
 sed -i 's|info_msg "\[${CURRENT_STEP}/${STEP_COUNT}\] \$\*"|info_msg "[${CURRENT_STEP}/${STEP_COUNT}] $(date +%H:%M:%S) $*"|' "$MKLIVE_DIR/mklive.sh"
 
+# Patch 3d: gate anti-corruzione (ADR-0012). Iniettiamo il controllo 'pre'
+# immediatamente prima di mksquashfs, passando come rootfs esattamente cio' che
+# viene compresso: "$ROOTFS" nel layout diretto (default), "$BUILDDIR/tmp" nel
+# layout classico. Scelta deliberata: patch mirata e idempotente di mklive.sh
+# invece di un controllo su $TEMP_OVERLAY + residui perche' solo in questo punto
+# e' disponibile il rootfs finale dopo l'installazione dei pacchetti.
+INTEGRITY_HELPER="$SCRIPT_DIR/verify-image-integrity.sh"
+INTEGRITY_MANIFEST="$BUILD_DIR/hyleos-image-integrity.manifest"
+if [ ! -x "$INTEGRITY_HELPER" ]; then
+    echo "ERRORE: manca l'helper eseguibile $INTEGRITY_HELPER." >&2
+    exit 1
+fi
+if [ "$DIRECT_SQUASHFS" = "1" ]; then
+    _sq_src='$ROOTFS'
+    _sq_anchor='mksquashfs "$ROOTFS" "$IMAGEDIR/LiveOS/squashfs.img"'
+else
+    _sq_src='$BUILDDIR/tmp'
+    _sq_anchor='mksquashfs "$BUILDDIR/tmp" "$IMAGEDIR/LiveOS/squashfs.img"'
+fi
+_pre_line="    \"$INTEGRITY_HELPER\" pre \"$_sq_src\" \"$INTEGRITY_MANIFEST\" || exit 1"
+if grep -q 'verify-image-integrity\.sh' "$MKLIVE_DIR/mklive.sh"; then
+    [ "$(grep -Fc -- "$_pre_line" "$MKLIVE_DIR/mklive.sh")" -eq 1 ] || {
+        echo "ERRORE: gate pre gia' presente ma non coerente con questa build in mklive.sh." >&2
+        exit 1
+    }
+else
+    _patch_tmp="$(mktemp /tmp/hyleos-mklive-integrity.XXXXXX)"
+    if ! INTEGRITY_PRE_LINE="$_pre_line" INTEGRITY_ANCHOR="$_sq_anchor" awk '
+        BEGIN { line = ENVIRON["INTEGRITY_PRE_LINE"]; anchor = ENVIRON["INTEGRITY_ANCHOR"] }
+        !done && index($0, anchor) > 0 { print line; done = 1 }
+        { print }
+        END { if (!done) exit 3 }
+    ' "$MKLIVE_DIR/mklive.sh" > "$_patch_tmp"; then
+        rm -f "$_patch_tmp"
+        echo "ERRORE: impossibile iniettare il gate pre in mklive.sh (ancora mksquashfs non trovata)." >&2
+        exit 1
+    fi
+    cp "$_patch_tmp" "$MKLIVE_DIR/mklive.sh"
+    rm -f "$_patch_tmp"
+fi
+
 # Patch 4: sostituisci lo splash generico con il nostro splash ufficiale Hyle OS
 if [ -f "$ROOT_DIR/out/rootfs-overlay/boot/isolinux/splash.png" ]; then
     cp -f "$ROOT_DIR/out/rootfs-overlay/boot/isolinux/splash.png" "$MKLIVE_DIR/data/splash.png" 2>/dev/null || true
@@ -331,6 +372,23 @@ $PRIV_CMD ./mklive.sh \
   -I "$TEMP_OVERLAY" \
   -C "live.autologin live.shell=/bin/bash quiet splash loglevel=3 vt.global_cursor_default=0 udev.log_level=3 $BOOT_EXTRA" \
   -T "Hyle OS 1.0 Beta (Hyprland + DMS Edition)"
+
+[ -s "$OUTPUT_ISO" ] || {
+    echo "ERRORE: ISO generata assente o vuota: $OUTPUT_ISO" >&2
+    exit 1
+}
+ISO_SHA256="$(sha256sum "$OUTPUT_ISO" | awk '{print $1}')"
+[ -n "$ISO_SHA256" ] || {
+    echo "ERRORE: impossibile calcolare lo sha256 della ISO generata." >&2
+    exit 1
+}
+HYLEOS_EXPECTED_ISO="$OUTPUT_ISO" HYLEOS_EXPECTED_ISO_SHA256="$ISO_SHA256" \
+    HYLEOS_XBPS_CACHE_DIRS="$CACHE_DIR${HYLEOS_REPO_DIR:+:$HYLEOS_REPO_DIR}" \
+    "$INTEGRITY_HELPER" post "$OUTPUT_ISO" "$INTEGRITY_MANIFEST" || {
+    echo "ERRORE: gate di integrita' immagine fallito: ISO non distribuibile." >&2
+    exit 1
+}
+echo "[OK] gate integrita' immagine superato (manifest $INTEGRITY_MANIFEST)"
 
 echo "[OK] ISO generata con successo in $OUTPUT_ISO"
 echo "[OK] Tempo totale: $(( $(date +%s) - BUILD_START ))s"
