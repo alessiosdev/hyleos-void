@@ -94,6 +94,8 @@ RECOMMENDED = [
 ]
 
 PKG_NAME_RE = re.compile(r"^[A-Za-z0-9@._+:-]+$")
+TECHNICAL_NAME_RE = re.compile(r"^lib|-(?:devel|dbg|static|doc|man)$")
+DESKTOP_DIR = "/usr/share/applications/"
 
 
 def is_protected(pkg):
@@ -119,6 +121,34 @@ def split_pkgver(pkgver):
     return m.group(1), m.group(2)
 
 
+def remove_preview(pkg):
+    """Simula `xbps-remove -Rny`. Ritorna (ok, names, message)."""
+    if not PKG_NAME_RE.match(pkg or ""):
+        return False, [], "Nome pacchetto non valido."
+    res = _run(["xbps-remove", "-Rny", pkg], timeout=60)
+    if res.returncode != 0:
+        output = ((res.stdout or "") + (res.stderr or "")).strip()
+        return False, [], output or "Simulazione della rimozione XBPS fallita."
+    names = []
+    seen = set()
+    for line in (res.stdout or "").splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        if "remove" in fields[1:]:
+            pkgver = fields[0]
+        elif fields[0] == "remove":
+            pkgver = fields[1]
+        else:
+            continue
+        name, _version = split_pkgver(pkgver)
+        if not PKG_NAME_RE.match(name) or name.endswith(":") or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return True, names, ""
+
+
 def installed_packages():
     """Dizionario pkgname -> versione per i pacchetti installati."""
     res = _run(["xbps-query", "-l"], timeout=20)
@@ -134,7 +164,7 @@ def installed_packages():
     return out
 
 
-def search(term, limit=60):
+def search(term, limit=90, include_technical=False):
     """Cerca pacchetti. Ritorna [(nome, descrizione, pkgname)]."""
     term = (term or "").strip()
     if not term:
@@ -151,11 +181,34 @@ def search(term, limit=60):
         name, desc = split_pkgver(m.group(1))
         if name in seen or not PKG_NAME_RE.match(name):
             continue
+        if not include_technical and TECHNICAL_NAME_RE.search(name):
+            continue
         seen.add(name)
         results.append((name, m.group(2).strip(), name))
         if len(results) >= limit:
             break
     return results
+
+
+def desktop_file(pkg):
+    """Primo .desktop esistente di pkg sotto /usr/share/applications/."""
+    if not PKG_NAME_RE.match(pkg or ""):
+        return None
+    try:
+        res = _run(["xbps-query", "-f", pkg], timeout=20)
+        if res.returncode != 0:
+            return None
+        for line in (res.stdout or "").splitlines():
+            path = line.strip()
+            if (
+                path.startswith(DESKTOP_DIR)
+                and path.endswith(".desktop")
+                and os.path.isfile(path)
+            ):
+                return path
+    except Exception:
+        return None
+    return None
 
 
 def catalog():
@@ -286,6 +339,15 @@ def remove(pkg):
     """Disinstalla via helper privilegiato. Ritorna (ok, messaggio)."""
     if is_protected(pkg):
         return False, "Componente protetto: non può essere rimosso dallo Store."
+    ok, names, msg = remove_preview(pkg)
+    if not ok:
+        return False, msg or "Anteprima della rimozione XBPS non disponibile."
+    blocked = sorted({name for name in names if is_protected(name)})
+    if blocked:
+        return False, (
+            "La rimozione richiederebbe di rimuovere componenti protetti (%s). "
+            "Operazione bloccata." % ", ".join(blocked)
+        )
     helper = _helper()
     if not helper:
         return False, "Helper di installazione non trovato (hyleos-store-xbps)."
@@ -297,6 +359,11 @@ def remove(pkg):
         return True, ""
     if res.returncode == 3:
         return False, "Componente protetto: non può essere rimosso dallo Store."
+    if res.returncode == 6:
+        detail = ((res.stdout or "") + (res.stderr or "")).strip()
+        return False, "La transazione tocca componenti protetti: " + (
+            detail or "rimozione bloccata dall'helper."
+        )
     return False, ((res.stdout or "") + (res.stderr or "")).strip()
 
 

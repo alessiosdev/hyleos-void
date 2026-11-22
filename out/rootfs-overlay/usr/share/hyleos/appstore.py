@@ -5,11 +5,29 @@ Interfaccia GTK4 pura, mouse-first, coerente con lo stile DMS. Le operazioni
 lunghe girano in thread e aggiornano la UI solo tramite GLib.idle_add.
 """
 
-import gi
+try:
+    import gi
 
-gi.require_version("Gtk", "4.0")
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gdk, Gio, GLib, Gtk
 
-from gi.repository import Gdk, Gio, GLib, Gtk
+    GI_AVAILABLE = True
+except Exception:
+    GI_AVAILABLE = False
+
+    class _StubMeta(type):
+        def __getattr__(cls, name):
+            return _GIStub
+
+    class _GIStub(metaclass=_StubMeta):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __call__(self, *args, **kwargs):
+            return _GIStub()
+
+    Gdk = Gio = GLib = Gtk = _GIStub
+
 import os
 import re
 import sys
@@ -110,6 +128,73 @@ def guess_category(name, desc, app_id):
     return "Altro"
 
 
+def package_count_label(count):
+    return "%d %s" % (count, "pacchetto" if count == 1 else "pacchetti")
+
+
+def format_transaction_list(names, pkg=""):
+    items = []
+    for name in names or []:
+        value = str(name or "").strip()
+        if value:
+            items.append(value)
+    if not items and pkg:
+        items = [str(pkg)]
+    lines = [
+        "La rimozione di %s comporta la rimozione dei seguenti pacchetti:"
+        % (pkg or "questo pacchetto"),
+        "",
+    ]
+    lines.extend("- %s" % name for name in items)
+    lines.extend([
+        "",
+        "Verranno richiesti privilegi di amministratore.",
+        "",
+        "Totale: %s." % package_count_label(len(items)),
+    ])
+    return "\n".join(lines)
+
+
+def make_search_app(result, installed_versions=None, protected_names=None):
+    parts = list(result)
+    name = parts[0] if len(parts) > 0 else ""
+    desc = parts[1] if len(parts) > 1 else ""
+    pkgname = parts[2] if len(parts) > 2 else ""
+    pkg = str(pkgname or name or "")
+    versions = installed_versions or {}
+    return {
+        "id": pkg,
+        "name": str(name or pkg),
+        "summary": str(desc or ""),
+        "category": guess_category(name, desc, pkg),
+        "version": versions.get(pkg, ""),
+        "source": SOURCE_SYSTEM,
+        "installed": pkg in versions,
+        "protected": bool(protected_names and pkg in protected_names),
+        "icon_path": None,
+        "entry": None,
+    }
+
+
+def select_apps_for_view(catalog_apps, search_apps, nav="esplora", category=None, query=""):
+    if search_apps is not None:
+        return sorted(search_apps, key=lambda app: str(app.get("name", "")).casefold())
+    if nav == "installate":
+        apps = [app for app in catalog_apps if app.get("installed")]
+    elif nav == "categorie":
+        apps = [app for app in catalog_apps if app.get("category") == category]
+    else:
+        apps = list(catalog_apps)
+    if query:
+        apps = [
+            app for app in apps
+            if query in str(app.get("name", "")).casefold()
+            or query in str(app.get("summary", "")).casefold()
+            or query in str(app.get("category", "")).casefold()
+        ]
+    return sorted(apps, key=lambda app: str(app.get("name", "")).casefold())
+
+
 def _markup(value):
     return GLib.markup_escape_text(_safe_text(value))
 
@@ -154,6 +239,8 @@ class AppCard(Gtk.Button):
         image.set_pixel_size(40)
         image.set_valign(Gtk.Align.CENTER)
         header.append(image)
+        self._header = header
+        self._icon_image = image
 
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         texts.set_hexpand(True)
@@ -206,6 +293,19 @@ class AppCard(Gtk.Button):
             pass
         return Gtk.Image.new_from_icon_name("application-x-executable")
 
+    def set_icon_path(self, path):
+        if not path or not isinstance(path, str) or not os.path.isfile(path):
+            return
+        try:
+            image = Gtk.Image.new_from_file(path)
+        except Exception:
+            return
+        image.set_pixel_size(40)
+        image.set_valign(Gtk.Align.CENTER)
+        self._header.remove(self._icon_image)
+        self._header.insert(image, 0)
+        self._icon_image = image
+
 
 class HyleOSStore(Gtk.Application):
     def __init__(self):
@@ -214,12 +314,19 @@ class HyleOSStore(Gtk.Application):
             flags=Gio.ApplicationFlags.NON_UNIQUE,
         )
         self.apps = []
+        self.xbps_versions = {}
         self.installed_xbps = set()
         self.installed_appimage = set()
         self.current_nav = "esplora"
         self.current_category = CATEGORIES[0]
         self.detail_app = None
         self._loading = False
+        self._search_token = 0
+        self._search_results = None
+        self._search_include_technical = False
+        self._search_query = ""
+        self._search_pending = False
+        self._icon_pending = set()
 
     # ------------------------------------------------------------------
     # Costruzione UI
@@ -339,6 +446,16 @@ class HyleOSStore(Gtk.Application):
         self.main_stack.add_named(self.error_box, "error")
 
         self.grid_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        self.search_options = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.search_options.set_margin_top(10)
+        self.search_options.set_margin_start(14)
+        self.search_options.set_margin_end(14)
+        self.technical_check = Gtk.CheckButton(label="Mostra pacchetti tecnici")
+        self.technical_check.connect("toggled", self.on_technical_toggled)
+        self.search_options.append(self.technical_check)
+        self.search_options.set_visible(False)
+
         self.category_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.category_bar.set_margin_top(10)
         self.category_bar.set_margin_start(14)
@@ -367,6 +484,7 @@ class HyleOSStore(Gtk.Application):
         self.scrolled.set_margin_start(12)
         self.scrolled.set_margin_end(12)
         self.scrolled.set_vexpand(True)
+        self.grid_page.append(self.search_options)
         self.grid_page.append(self.category_bar)
         self.grid_page.append(self.scrolled)
         self.main_stack.add_named(self.grid_page, "grid")
@@ -542,6 +660,7 @@ class HyleOSStore(Gtk.Application):
     def on_data_loaded(self, apps, xbps_installed, appimage_installed, errors):
         self._loading = False
         self.apps = apps
+        self.xbps_versions = dict(xbps_installed)
         self.installed_xbps = set(xbps_installed)
         self.installed_appimage = set(appimage_installed)
 
@@ -600,25 +719,74 @@ class HyleOSStore(Gtk.Application):
         self.main_stack.set_visible_child_name("grid")
 
     def on_search_changed(self, entry):
-        if self.main_stack.get_visible_child_name() != "detail":
+        if self.main_stack.get_visible_child_name() == "detail":
+            return
+        self._search_token += 1
+        query = self.search_entry.get_text().strip()
+        self._search_query = query
+        self._search_results = None
+        if not query:
+            self._search_pending = False
             self.populate_grid()
+            return
+        self._search_pending = True
+        self.populate_grid()
+        GLib.timeout_add(300, self._search_debounced, query, self._search_token)
+
+    def _search_debounced(self, query, token):
+        if token != self._search_token or query != self._search_query:
+            return False
+        threading.Thread(
+            target=self._async_search, args=(query, token), daemon=True
+        ).start()
+        return False
+
+    def on_technical_toggled(self, button):
+        self._search_include_technical = bool(button.get_active())
+        if not self._search_query:
+            return
+        self._search_token += 1
+        token = self._search_token
+        query = self._search_query
+        self._search_results = None
+        self._search_pending = True
+        self.populate_grid()
+        GLib.timeout_add(0, self._search_debounced, query, token)
+
+    def _async_search(self, query, token):
+        results = []
+        try:
+            if xbps_backend is not None:
+                results = xbps_backend.search(
+                    query, limit=90, include_technical=self._search_include_technical
+                ) or []
+        except Exception:
+            results = []
+        GLib.idle_add(self.on_search_results, token, query, results)
+        return False
+
+    def on_search_results(self, token, query, results):
+        if token != self._search_token or query != self._search_query:
+            return False
+        protected_names = set()
+        try:
+            for _name, _desc, pkgname in results:
+                if xbps_backend is not None and xbps_backend.is_protected(pkgname):
+                    protected_names.add(pkgname)
+        except Exception:
+            protected_names = set()
+        self._search_results = [
+            make_search_app(row, self.xbps_versions, protected_names) for row in results
+        ]
+        self._search_pending = False
+        self.populate_grid()
+        return False
 
     def visible_apps(self):
         query = self.search_entry.get_text().strip().casefold()
-        if self.current_nav == "installate":
-            apps = [app for app in self.apps if app.get("installed")]
-        elif self.current_nav == "categorie":
-            apps = [app for app in self.apps if app.get("category") == self.current_category]
-        else:
-            apps = list(self.apps)
-        if query:
-            apps = [
-                app for app in apps
-                if query in str(app.get("name", "")).casefold()
-                or query in str(app.get("summary", "")).casefold()
-                or query in str(app.get("category", "")).casefold()
-            ]
-        return sorted(apps, key=lambda app: str(app.get("name", "")).casefold())
+        return select_apps_for_view(
+            self.apps, self._search_results, self.current_nav, self.current_category, query
+        )
 
     def populate_grid(self):
         while True:
@@ -627,14 +795,63 @@ class HyleOSStore(Gtk.Application):
                 break
             self.grid.remove(child)
 
+        self.search_options.set_visible(bool(self._search_query))
         self.category_bar.set_visible(self.current_nav == "categorie")
+        if self._search_pending:
+            pending = Gtk.Label(
+                label="Ricerca di '%s' in corso..." % _safe_text(self._search_query)
+            )
+            pending.add_css_class("dim-label")
+            pending.set_xalign(0)
+            self.grid.append(pending)
+            return
         apps = self.visible_apps()[:MAX_CARDS]
         for app in apps:
-            self.grid.append(AppCard(app, self.on_app_clicked))
+            card = AppCard(app, self.on_app_clicked)
+            self.grid.append(card)
+            self._maybe_download_icon(app, card)
         if not apps:
             empty = Gtk.Label(label="Nessuna applicazione trovata.")
             empty.add_css_class("dim-label")
             self.grid.append(empty)
+
+    def _maybe_download_icon(self, app, card):
+        if app.get("source") != SOURCE_APPIMAGE or app.get("installed"):
+            return
+        entry = app.get("entry")
+        if not isinstance(entry, dict):
+            return
+        if not str(entry.get("icon_url") or "").startswith("https://"):
+            return
+        icon_path = app.get("icon_path")
+        if icon_path and os.path.isfile(icon_path):
+            return
+        key = str(app.get("id") or id(card))
+        if key in self._icon_pending:
+            return
+        self._icon_pending.add(key)
+        threading.Thread(
+            target=self._async_icon, args=(app, entry, card, key), daemon=True
+        ).start()
+
+    def _async_icon(self, app, entry, card, key):
+        path = None
+        try:
+            if appimage_backend is not None:
+                path = appimage_backend.cached_icon(entry)
+        except Exception:
+            path = None
+        GLib.idle_add(self._icon_ready, card, path, key)
+        return False
+
+    def _icon_ready(self, card, path, key):
+        self._icon_pending.discard(key)
+        if not path:
+            return False
+        card.app["icon_path"] = path
+        if card.get_parent() is self.grid:
+            card.set_icon_path(path)
+        return False
 
     def on_app_clicked(self, button, app):
         self.detail_app = app
@@ -674,6 +891,82 @@ class HyleOSStore(Gtk.Application):
         self._start_action("install")
 
     def on_remove_clicked(self, button):
+        app = self.detail_app
+        if app is None:
+            return
+        if app.get("source") != SOURCE_SYSTEM:
+            self._start_action("remove")
+            return
+        if xbps_backend is None:
+            self._show_dialog(
+                "Anteprima rimozione non disponibile", "Backend XBPS non disponibile."
+            )
+            return
+        threading.Thread(
+            target=self._async_remove_preview, args=(app,), daemon=True
+        ).start()
+
+    def _async_remove_preview(self, app):
+        try:
+            ok, names, message = xbps_backend.remove_preview(app["id"])
+        except Exception as exc:
+            ok, names, message = False, [], _safe_text(exc) or "Simulazione non riuscita."
+        GLib.idle_add(
+            self.on_remove_preview_ready, app, bool(ok), list(names or []), message
+        )
+        return False
+
+    def on_remove_preview_ready(self, app, ok, names, message):
+        if self.detail_app is not app:
+            return False
+        if not ok:
+            self._show_dialog(
+                "Anteprima rimozione non disponibile",
+                _safe_text(message) or "Simulazione della rimozione non riuscita.",
+            )
+            return False
+        items = [str(name) for name in names if str(name).strip()] or [app["id"]]
+        text = format_transaction_list(items, app.get("id", ""))
+        self._show_confirm_remove_dialog(items, text)
+        return False
+
+    def _show_confirm_remove_dialog(self, names, text):
+        dialog = Gtk.Window(transient_for=None, modal=True, title="Conferma rimozione")
+        dialog.set_default_size(520, -1)
+        dialog.set_resizable(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_margin_top(20)
+        box.set_margin_bottom(20)
+        box.set_margin_start(20)
+        box.set_margin_end(20)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_min_content_height(120)
+        scrolled.set_max_content_height(400)
+        scrolled.set_propagate_natural_height(True)
+        label = Gtk.Label(label=text)
+        label.set_wrap(True)
+        label.set_xalign(0)
+        label.set_selectable(True)
+        scrolled.set_child(label)
+        box.append(scrolled)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        actions.set_halign(Gtk.Align.END)
+        cancel = Gtk.Button(label="Annulla")
+        cancel.connect("clicked", lambda _button: dialog.destroy())
+        confirm = Gtk.Button(label="Rimuovi %s" % package_count_label(len(names)))
+        confirm.add_css_class("destructive-action")
+        confirm.connect("clicked", self._on_confirm_remove, dialog)
+        actions.append(cancel)
+        actions.append(confirm)
+        box.append(actions)
+        dialog.set_child(box)
+        dialog.present()
+
+    def _on_confirm_remove(self, button, dialog):
+        dialog.destroy()
         self._start_action("remove")
 
     def on_open_clicked(self, button):
@@ -746,7 +1039,16 @@ class HyleOSStore(Gtk.Application):
                 raise RuntimeError("Backend AppImage non disponibile.")
             appimage_backend.open_app(app["id"])
             return
-        info = Gio.DesktopAppInfo.new(app["id"] + ".desktop")
+        info = None
+        if xbps_backend is not None:
+            path = xbps_backend.desktop_file(app["id"])
+            if path:
+                try:
+                    info = Gio.DesktopAppInfo.new_from_filename(path)
+                except Exception:
+                    info = None
+        if info is None:
+            info = Gio.DesktopAppInfo.new(app["id"] + ".desktop")
         if info is None:
             needle = str(app.get("name", "")).casefold()
             for candidate in Gio.AppInfo.get_all():
@@ -803,4 +1105,10 @@ class HyleOSStore(Gtk.Application):
 
 
 if __name__ == "__main__":
+    if not GI_AVAILABLE:
+        print(
+            "HyleOS Store: GTK4/GI non disponibile. installare GTK 4.0 e le dipendenze gi richieste.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     HyleOSStore().run(sys.argv)

@@ -41,6 +41,13 @@ MANIFEST_VERSION = 1
 MANIFEST_REL = os.path.join(".local", "state", "hyleos", "appimage-installed.json")
 ICON_EXTS = {".png", ".svg", ".jpg", ".jpeg", ".webp", ".xpm", ".ico"}
 ICON_SIZES = {16, 22, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024}
+ICON_CACHE_ROOT_REL = os.path.join(".cache", "hyleos-store")
+REMOTE_ICON_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+REMOTE_ICON_EXTS_ORDER = (".png", ".jpg", ".jpeg", ".webp")
+REMOTE_ICON_MAX_BYTES = 2 * 1024 * 1024
+REMOTE_ICON_TIMEOUT = 5
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+JPEG_MAGIC = b"\xff\xd8\xff"
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -607,6 +614,85 @@ def _write_desktop(source, destination, entry, appimage):
 # Azioni
 # ---------------------------------------------------------------------------
 
+def _remove_stale_files(old_manifest, new_manifest, app_id, manifest_file):
+    """Elimina i file del vecchio manifest non presenti in quello nuovo."""
+    old_entry = old_manifest.get("apps", {}).get(app_id, {})
+    new_entry = new_manifest.get("apps", {}).get(app_id, {})
+    old_files = old_entry.get("files", []) if isinstance(old_entry, dict) else []
+    new_files = new_entry.get("files", []) if isinstance(new_entry, dict) else []
+    keep = {path for path in new_files if isinstance(path, str)}
+    if not isinstance(old_files, list):
+        return
+    for candidate in old_files:
+        if not isinstance(candidate, str) or not os.path.isabs(candidate):
+            continue
+        if candidate == manifest_file or candidate in keep:
+            continue
+        if not _is_allowed_path(candidate) or not _is_allowed_path(candidate, resolve=True):
+            continue
+        if os.path.isdir(candidate) and not os.path.islink(candidate):
+            continue
+        if os.path.isfile(candidate) or os.path.islink(candidate):
+            os.unlink(candidate)
+
+
+def _asset_paths(manifest, app_id, manifest_file, binary):
+    """Percorsi asset di app_id con le stesse guardie di _remove_stale_files."""
+    entry = manifest.get("apps", {}).get(app_id, {})
+    if not isinstance(entry, dict):
+        return []
+    candidates = []
+    for key in ("desktop", "icon"):
+        value = entry.get(key)
+        if isinstance(value, str):
+            candidates.append(value)
+    extra = entry.get("files", [])
+    if isinstance(extra, list):
+        candidates.extend(path for path in extra if isinstance(path, str))
+    paths = []
+    seen = set()
+    for path in candidates:
+        if path in seen or path == manifest_file or path == binary:
+            continue
+        if not os.path.isabs(path) or not _is_allowed_path(path) or not _is_allowed_path(path, resolve=True):
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
+def _stage_asset_backups(paths, workdir):
+    """Copia gli asset correnti nella staging dir; i file assenti non sono copiati."""
+    backups = []
+    for index, path in enumerate(paths):
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        staged = os.path.join(workdir, "restore", "%03d" % index, os.path.basename(path))
+        _copy_file_user(path, staged)
+        backups.append((path, staged))
+    return backups
+
+
+def _restore_assets(backups, old_manifest, new_manifest, app_id, manifest_file, binary):
+    """Ripristina gli asset v1 e rimuove quelli nuovi non presenti in v1."""
+    for path, staged in backups:
+        try:
+            _copy_file_user(staged, path)
+        except Exception:
+            pass
+    backed_up = {path for path, _staged in backups}
+    old_paths = set(_asset_paths(old_manifest, app_id, manifest_file, binary)) & backed_up
+    new_paths = set(_asset_paths(new_manifest, app_id, manifest_file, binary))
+    for path in sorted(new_paths - old_paths):
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                continue
+            if os.path.isfile(path) or os.path.islink(path):
+                os.unlink(path)
+        except OSError:
+            pass
+
+
 def install(entry):
     """Scarica, verifica e installa un'AppImage nell'home dell'utente.
 
@@ -626,6 +712,11 @@ def install(entry):
     root = apps_dir()
     os.makedirs(root, exist_ok=True)
     final = appimage_path(app_id)
+    if not _is_allowed_path(final, resolve=True):
+        raise InstallError("Destinazione AppImage non consentita: %s" % final)
+    manifest_file = manifest_path()
+    old_manifest = _read_manifest()
+    had_manifest = os.path.isfile(manifest_file)
     files = [final]
     desktop = None
     icon = None
@@ -637,6 +728,8 @@ def install(entry):
         prefix="." + app_id + "-", suffix=".AppImage.part", dir=state_dir()
     )
     os.close(fd)
+    backup = None
+    committed = False
     try:
         _download(url, temp_file)
         if os.path.getsize(temp_file) == 0:
@@ -651,46 +744,216 @@ def install(entry):
         with tempfile.TemporaryDirectory(
             prefix="hyleos-appimage-", dir=state_dir()
         ) as workdir:
+            staged_desktop = None
+            staged_icon = None
             extracted = _extract_appimage(temp_file, workdir)
             if extracted:
                 desktop_source, icon_source = _find_assets(extracted, app_id, clean["name"])
                 if desktop_source:
-                    desktop = os.path.join(
-                        desktop_dir(),
-                        safe_basename("hyleos-" + app_id + ".desktop", "file .desktop"),
+                    desktop_name = safe_basename(
+                        "hyleos-" + app_id + ".desktop", "file .desktop"
                     )
-                    _write_desktop(desktop_source, desktop, clean, final)
-                    files.append(desktop)
+                    desktop = os.path.join(desktop_dir(), desktop_name)
+                    staged_desktop = os.path.join(workdir, "assets", "desktop", desktop_name)
+                    _write_desktop(desktop_source, staged_desktop, clean, final)
                 if icon_source:
                     size, ext = _icon_size_and_ext(icon_source)
                     icon_name = safe_basename(app_id + ext, "icona")
                     icon = os.path.join(icons_dir(), str(size), "apps", icon_name)
-                    _copy_file_user(icon_source, icon)
+                    staged_icon = os.path.join(workdir, "assets", "icons", str(size), icon_name)
+                    _copy_file_user(icon_source, staged_icon)
+
+            backups = _stage_asset_backups(
+                _asset_paths(old_manifest, app_id, manifest_file, final), workdir
+            )
+            if os.path.lexists(final):
+                backup = os.path.join(workdir, "backup", app_id + ".AppImage")
+                os.makedirs(os.path.dirname(backup), exist_ok=True)
+                os.replace(final, backup)
+            os.replace(temp_file, final)
+            temp_file = None
+            committed = True
+            manifest = {
+                "version": MANIFEST_VERSION,
+                "apps": dict(old_manifest.get("apps", {})),
+            }
+            manifest["apps"][app_id] = {
+                "id": app_id,
+                "name": clean["name"],
+                "summary": clean["summary"],
+                "category": clean["category"],
+                "version": clean["version"],
+                "source": "AppImage",
+                "appimage": final,
+                "desktop": desktop,
+                "icon": icon,
+                "files": files,
+            }
+            try:
+                if staged_desktop:
+                    _write_desktop(staged_desktop, desktop, clean, final)
+                    files.append(desktop)
+                if staged_icon:
+                    _copy_file_user(staged_icon, icon)
                     files.append(icon)
-        # Solo dopo estrazione e copia di desktop/icona riuscite si sostituisce
-        # il file finale: nessuna finestra in cui un eseguibile non verificato
-        # è già installato con il nome canonico.
-        os.replace(temp_file, final)
-        temp_file = None
+                _write_manifest(manifest)
+                _remove_stale_files(old_manifest, manifest, app_id, manifest_file)
+            except Exception:
+                try:
+                    if backup and os.path.lexists(backup):
+                        os.replace(backup, final)
+                    elif committed and os.path.lexists(final):
+                        os.unlink(final)
+                except Exception:
+                    pass
+                try:
+                    if had_manifest:
+                        _write_manifest(old_manifest)
+                    elif os.path.lexists(manifest_file):
+                        os.unlink(manifest_file)
+                except Exception:
+                    pass
+                try:
+                    _restore_assets(
+                        backups, old_manifest, manifest, app_id, manifest_file, final
+                    )
+                except Exception:
+                    pass
+                raise
     finally:
         if temp_file and os.path.lexists(temp_file):
             os.unlink(temp_file)
-
-    manifest = _read_manifest()
-    manifest["apps"][app_id] = {
-        "id": app_id,
-        "name": clean["name"],
-        "summary": clean["summary"],
-        "category": clean["category"],
-        "version": clean["version"],
-        "source": "AppImage",
-        "appimage": final,
-        "desktop": desktop,
-        "icon": icon,
-        "files": files,
-    }
-    _write_manifest(manifest)
     return final
+
+
+def _remote_icon_ext(url, content_type):
+    ext = os.path.splitext(urllib.parse.urlsplit(url).path.lower())[1]
+    if ext in REMOTE_ICON_EXTS:
+        return ext
+    value = _one_line(content_type).lower().split(";", 1)[0].strip()
+    return {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/webp": ".webp",
+    }.get(value)
+
+
+def _remote_icon_format(data):
+    if data.startswith(PNG_MAGIC):
+        return ".png"
+    if data.startswith(JPEG_MAGIC):
+        return ".jpg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def _remote_icon_ext_for(data, hint):
+    detected = _remote_icon_format(data)
+    if detected is None:
+        return None
+    if hint == ".jpeg" and detected == ".jpg":
+        return ".jpeg"
+    return hint if hint == detected else detected
+
+
+def _icon_cache_root():
+    return os.path.join(os.path.realpath(home_dir()), ICON_CACHE_ROOT_REL)
+
+
+def _icon_cache_safe(path):
+    if not isinstance(path, str) or not os.path.isabs(path) or "\x00" in path:
+        return False
+    root = _icon_cache_root()
+    for candidate in (root, os.path.join(root, "icons"), path):
+        if os.path.islink(candidate):
+            return False
+    try:
+        return os.path.commonpath([os.path.realpath(path), root]) == root
+    except ValueError:
+        return False
+
+
+def _icon_cache_dir(app_id):
+    target = os.path.join(
+        _icon_cache_root(), "icons", safe_basename(app_id, "id icona")
+    )
+    return target if _icon_cache_safe(target) else None
+
+
+def _valid_cached_icon(path):
+    if not path or os.path.islink(path) or not os.path.isfile(path):
+        return None
+    if not _icon_cache_safe(path):
+        return None
+    try:
+        if os.path.getsize(path) > REMOTE_ICON_MAX_BYTES:
+            return None
+        with open(path, "rb") as handle:
+            head = handle.read(12)
+    except OSError:
+        return None
+    return path if _remote_icon_format(head) else None
+
+
+def cached_icon(entry):
+    """Icona remota in cache sotto $HOME; None in silenzio in caso di errore."""
+    try:
+        if not isinstance(entry, dict):
+            return None
+        url = _one_line(entry.get("icon_url"))
+        parts = urllib.parse.urlsplit(url)
+        if not url or parts.scheme.lower() != "https" or not parts.netloc:
+            return None
+        target_dir = _icon_cache_dir(entry.get("id"))
+        if not target_dir:
+            return None
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
+        for ext in REMOTE_ICON_EXTS_ORDER:
+            cached = _valid_cached_icon(os.path.join(target_dir, digest + ext))
+            if cached:
+                return cached
+
+        request = urllib.request.Request(url, headers={"User-Agent": "HyleOS-Store/1.0"})
+        with urllib.request.urlopen(request, timeout=REMOTE_ICON_TIMEOUT) as response:
+            chunks = []
+            total = 0
+            while total <= REMOTE_ICON_MAX_BYTES:
+                chunk = response.read(REMOTE_ICON_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            headers = response.headers
+            content_type = headers.get("Content-Type", "") if headers else ""
+        if total > REMOTE_ICON_MAX_BYTES:
+            return None
+        data = b"".join(chunks)
+        ext = _remote_icon_ext_for(data, _remote_icon_ext(url, content_type))
+        if ext is None:
+            return None
+
+        os.makedirs(target_dir, exist_ok=True)
+        if not _icon_cache_safe(target_dir):
+            return None
+        final = os.path.join(target_dir, digest + ext)
+        if os.path.islink(final):
+            return None
+        fd, temp = tempfile.mkstemp(
+            prefix=".hyleos-icon-", suffix=".part", dir=target_dir
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            os.chmod(temp, 0o644)
+            os.replace(temp, final)
+        finally:
+            if os.path.lexists(temp):
+                os.unlink(temp)
+        return final
+    except Exception:
+        return None
 
 
 def _canonical_paths(app_id):

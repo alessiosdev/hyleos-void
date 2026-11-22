@@ -1,7 +1,7 @@
 # Ricetta xbps-src — hyleos-store
 pkgname=hyleos-store
 version=1.0.0
-revision=4
+revision=5
 short_desc="HyleOS Store - app desktop via XBPS e AppImage utente"
 maintainer="Hyle OS Team"
 license="MIT"

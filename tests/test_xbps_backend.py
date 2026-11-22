@@ -174,6 +174,132 @@ class XbpsBackendTest(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertIn("zsh", names)
 
+    def test_remove_preview_collects_all_removed_packages(self):
+        seen = []
+
+        def _run(cmd, timeout=60, env=None):
+            seen.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "firefox-160.0_1 remove x86_64 repo 1 1\n"
+                "libfoo-2.1_1 remove x86_64 repo 1 1\n"
+                "zsh-5.9.2_1 install x86_64 repo 1 1\n",
+                "",
+            )
+
+        self.mod._run = _run
+        ok, names, msg = self.mod.remove_preview("firefox")
+        self.assertTrue(ok)
+        self.assertEqual(names, ["firefox", "libfoo"])
+        self.assertEqual(msg, "")
+        self.assertEqual(seen, [["xbps-remove", "-Rny", "firefox"]])
+
+        self.mod._run = lambda cmd, timeout=60, env=None: subprocess.CompletedProcess(
+            cmd, 1, "", "ERROR: simulazione non disponibile"
+        )
+        ok, names, msg = self.mod.remove_preview("firefox")
+        self.assertFalse(ok)
+        self.assertEqual(names, [])
+        self.assertIn("simulazione non disponibile", msg)
+
+    def test_remove_blocks_when_transaction_touches_protected(self):
+        helper_path = "/fake/hyleos-store-xbps"
+        self.mod._helper = lambda: helper_path
+        self.mod._priv_prefix = lambda: []
+        calls = []
+
+        def _run(cmd, timeout=60, env=None):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "firefox-160.0_1 remove x86_64 repo 1 1\n"
+                "hyprland-0.57.1_1 remove x86_64 repo 1 1\n",
+                "",
+            )
+
+        self.mod._run = _run
+        ok, msg = self.mod.remove("firefox")
+        self.assertFalse(ok)
+        self.assertIn("hyprland", msg)
+        self.assertIn("protetti", msg)
+        self.assertEqual(calls, [["xbps-remove", "-Rny", "firefox"]])
+        self.assertEqual([cmd for cmd in calls if helper_path in cmd], [])
+
+    def test_remove_maps_helper_exit6(self):
+        helper_path = "/fake/hyleos-store-xbps"
+        self.mod._helper = lambda: helper_path
+        self.mod._priv_prefix = lambda: []
+
+        def _run(cmd, timeout=60, env=None):
+            if cmd[:3] == ["xbps-remove", "-Rny", "firefox"]:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "firefox-160.0_1 remove x86_64 repo 1 1\n", ""
+                )
+            self.assertEqual(cmd[-3:], [helper_path, "remove", "firefox"])
+            return subprocess.CompletedProcess(
+                cmd, 6, "", "ERRORE: la transazione tocca pacchetti protetti: hyprland"
+            )
+
+        self.mod._run = _run
+        ok, msg = self.mod.remove("firefox")
+        self.assertFalse(ok)
+        self.assertIn("protetti", msg)
+        self.assertIn("hyprland", msg)
+
+    def test_search_hides_technical_by_default(self):
+        self._fake(
+            stdout=(
+                "[-] firefox-160.0_1                          Firefox\n"
+                "[-] firefox-devel-160.0_1                   Firefox development files\n"
+                "[-] libfoo-1.2_1                            Library with a nice name\n"
+                "[-] zsh-5.9.2_1                             Shell\n"
+            )
+        )
+        self.assertEqual(
+            [r[2] for r in self.mod.search("firefox")], ["firefox", "zsh"]
+        )
+        self.assertEqual(
+            [r[2] for r in self.mod.search("firefox", include_technical=True)],
+            ["firefox", "firefox-devel", "libfoo", "zsh"],
+        )
+
+    def test_desktop_file_finds_desktop_and_falls_back(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            apps = os.path.join(tmp, "usr", "share", "applications")
+            os.makedirs(apps)
+            self.mod.DESKTOP_DIR = apps + os.sep
+            desktop = os.path.join(apps, "firefox.desktop")
+            with open(desktop, "w") as handle:
+                handle.write("[Desktop Entry]\n")
+            calls = []
+
+            def _run(cmd, timeout=60, env=None):
+                calls.append((cmd, timeout))
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    self.mod.DESKTOP_DIR + "hyleos-inesistente.desktop\n"
+                    + desktop
+                    + "\n"
+                    + self.mod.DESKTOP_DIR
+                    + "assente.desktop\n",
+                    "",
+                )
+
+            self.mod._run = _run
+            self.assertEqual(self.mod.desktop_file("firefox"), desktop)
+            self.assertEqual(calls[0][0], ["xbps-query", "-f", "firefox"])
+            self.assertEqual(calls[0][1], 20)
+
+            self.mod._run = lambda cmd, timeout=60, env=None: subprocess.CompletedProcess(
+                cmd, 0, self.mod.DESKTOP_DIR + "assente.desktop\n", ""
+            )
+            self.assertIsNone(self.mod.desktop_file("firefox"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

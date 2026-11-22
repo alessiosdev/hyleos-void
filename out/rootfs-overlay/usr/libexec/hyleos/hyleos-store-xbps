@@ -15,12 +15,13 @@
 #   3  pacchetto protetto
 #   4  preflight fallito
 #   5  serve aggiornare prima il sistema
+#   6  transazione tocca pacchetto protetto
 set -u
 
 PROTECTED="base-system hyprland hyleos-dms hyleos-desktop hyleos-store hyleos-session quickshell NetworkManager pipewire pipewire-pulse wireplumber elogind dbus xbps glibc linux linux6.6 linux6.12 linux6.18"
 CORE="xbps glibc base-system hyprland hyleos-dms hyleos-desktop hyleos-store quickshell mesa wayland elogind dbus"
 
-die() { msg="$1"; code="${2:-4}"; echo "ERRORE: $msg" >&2; exit "$code"; }
+die() { msg="$1"; code="${2:-4}"; printf 'ERRORE: %s\n' "$msg" >&2; exit "$code"; }
 
 [ "$#" -eq 2 ] || die "uso: $0 preflight|install|remove <pkg>" 2
 action="$1"
@@ -87,6 +88,20 @@ case "$action" in
         exec xbps-install -Sy "$pkg"
         ;;
     remove)
+        sim="$(xbps-remove -Rny "$pkg" 2>&1)" || {
+            printf '%s\n' "$sim" >&2
+            die "simulazione della rimozione fallita" 4
+        }
+        blocked="$(printf '%s\n' "$sim" | awk '$2 == "remove" {print $1}' \
+            | while IFS= read -r pv; do
+                name="${pv%-*}"
+                if is_protected "$name"; then
+                    printf '%s\n' "$name"
+                fi
+              done | sort -u)"
+        if [ -n "$blocked" ]; then
+            die "la transazione tocca pacchetti protetti: $blocked" 6
+        fi
         exec xbps-remove -Ry "$pkg"
         ;;
     *)

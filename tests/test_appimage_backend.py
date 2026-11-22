@@ -288,6 +288,248 @@ class AppImageBackendTest(unittest.TestCase):
         self.assertEqual(self.mod.installed_ids(), ["obsidian"])
         self.assertFalse(self.mod.is_installed("a/../../x"))
 
+    def test_reinstall_replaces_assets_and_removes_stale_files(self):
+        first = self.mod.install(self.entry)
+        with open(self.mod.manifest_path(), encoding="utf-8") as handle:
+            old_files = list(json.load(handle)["apps"]["obsidian"]["files"])
+        old_icon = next(path for path in old_files if "/256/apps/" in path)
+        self.assertTrue(os.path.isfile(old_icon))
+
+        new_payload = b"fake AppImage payload versione 2\n"
+        self.payload = new_payload
+
+        def _fake_extract_v2(appimage, workdir):
+            root = os.path.join(workdir, "squashfs-root")
+            os.makedirs(root, exist_ok=True)
+            with open(os.path.join(root, "obsidian-v2.desktop"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[Desktop Entry]\nName=Obsidian v2\n"
+                    "Comment=seconda versione\nCategories=GTK;\n"
+                )
+            with open(os.path.join(root, "obsidian-128x128.png"), "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\nicona-128")
+            return root
+
+        self.mod._extract_appimage = _fake_extract_v2
+        entry_v2 = dict(
+            self.entry,
+            version="2.0",
+            sha256=hashlib.sha256(new_payload).hexdigest(),
+        )
+        second = self.mod.install(entry_v2)
+
+        self.assertEqual(second, first)
+        with open(second, "rb") as handle:
+            self.assertEqual(handle.read(), new_payload)
+        self.assertFalse(os.path.exists(old_icon))
+        new_icon = os.path.join(self.mod.icons_dir(), "128", "apps", "obsidian.png")
+        self.assertTrue(os.path.isfile(new_icon))
+
+        with open(self.mod.manifest_path(), encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        self.assertEqual(manifest["apps"]["obsidian"]["version"], "2.0")
+        self.assertEqual(
+            set(manifest["apps"]["obsidian"]["files"]),
+            {second, self.mod.desktop_path("obsidian"), new_icon},
+        )
+        with open(self.mod.desktop_path("obsidian"), encoding="utf-8") as handle:
+            self.assertIn("Name=Obsidian v2", handle.read())
+        for directory in (self.mod.state_dir(), self.mod.apps_dir()):
+            leftovers = [
+                name for name in os.listdir(directory)
+                if ".part" in name or name.startswith("hyleos-appimage-")
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_reinstall_failure_rolls_back_binary(self):
+        first = self.mod.install(self.entry)
+        with open(first, "rb") as handle:
+            old_binary = handle.read()
+        old_icon = os.path.join(self.mod.icons_dir(), "256", "apps", "obsidian.png")
+        with open(old_icon, "rb") as handle:
+            old_icon_data = handle.read()
+        with open(self.mod.manifest_path(), encoding="utf-8") as handle:
+            old_manifest = json.load(handle)
+
+        new_payload = b"fake AppImage payload che non deve restare\n"
+        self.payload = new_payload
+        entry_v2 = dict(
+            self.entry,
+            version="2.0",
+            sha256=hashlib.sha256(new_payload).hexdigest(),
+        )
+
+        original_write_desktop = self.mod._write_desktop
+        calls = []
+
+        def flaky_write_desktop(source, destination, entry, appimage):
+            calls.append(destination)
+            if len(calls) == 2:
+                raise OSError("errore simulato sulla destinazione finale")
+            return original_write_desktop(source, destination, entry, appimage)
+
+        self.mod._write_desktop = flaky_write_desktop
+        with self.assertRaises(OSError):
+            self.mod.install(entry_v2)
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].startswith(self.mod.state_dir()), calls[0])
+        self.assertEqual(calls[1], self.mod.desktop_path("obsidian"))
+        with open(first, "rb") as handle:
+            self.assertEqual(handle.read(), old_binary)
+        with open(self.mod.manifest_path(), encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle), old_manifest)
+        with open(old_icon, "rb") as handle:
+            self.assertEqual(handle.read(), old_icon_data)
+        for directory in (self.mod.state_dir(), self.mod.apps_dir()):
+            leftovers = [
+                name for name in os.listdir(directory)
+                if ".part" in name or name.startswith("hyleos-appimage-")
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_asset_rollback_removes_new_paths_after_commit_failure(self):
+        first = self.mod.install(self.entry)
+        old_icon = os.path.join(self.mod.icons_dir(), "256", "apps", "obsidian.png")
+        with open(old_icon, "rb") as handle:
+            old_icon_data = handle.read()
+        old_desktop = self.mod.desktop_path("obsidian")
+        with open(old_desktop, encoding="utf-8") as handle:
+            old_desktop_data = handle.read()
+
+        old_payload = self.payload
+        new_payload = b"fake AppImage payload v2 con icona 128\n"
+        self.payload = new_payload
+
+        def _fake_extract_v2(appimage, workdir):
+            root = os.path.join(workdir, "squashfs-root")
+            os.makedirs(root, exist_ok=True)
+            with open(os.path.join(root, "v2.desktop"), "w", encoding="utf-8") as handle:
+                handle.write("[Desktop Entry]\nName=Obsidian v2\n")
+            with open(os.path.join(root, "app-128x128.png"), "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\nicona-128")
+            return root
+
+        self.mod._extract_appimage = _fake_extract_v2
+        entry_v2 = dict(
+            self.entry,
+            version="2.0",
+            sha256=hashlib.sha256(new_payload).hexdigest(),
+        )
+
+        original_write_manifest = self.mod._write_manifest
+        calls = []
+
+        def flaky_write_manifest(manifest):
+            calls.append(manifest)
+            if len(calls) == 1:
+                raise OSError("errore simulato sul manifest v2")
+            return original_write_manifest(manifest)
+
+        self.mod._write_manifest = flaky_write_manifest
+        with self.assertRaises(OSError):
+            self.mod.install(entry_v2)
+
+        self.assertEqual(len(calls), 2)
+        with open(first, "rb") as handle:
+            self.assertEqual(handle.read(), old_payload)
+        with open(self.mod.manifest_path(), encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["apps"]["obsidian"]["version"], "1.0")
+        with open(old_desktop, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), old_desktop_data)
+        with open(old_icon, "rb") as handle:
+            self.assertEqual(handle.read(), old_icon_data)
+        new_icon = os.path.join(self.mod.icons_dir(), "128", "apps", "obsidian.png")
+        self.assertFalse(os.path.exists(new_icon))
+        for directory in (self.mod.state_dir(), self.mod.apps_dir()):
+            leftovers = [
+                name for name in os.listdir(directory)
+                if ".part" in name or name.startswith("hyleos-appimage-")
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_cached_icon_downloads_validates_and_caches(self):
+        class FakeResponse:
+            def __init__(self, data):
+                self._data = data
+                self.headers = {"Content-Type": "image/png"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size=-1):
+                if not self._data:
+                    return b""
+                if size is None or size < 0:
+                    size = len(self._data)
+                chunk = self._data[:size]
+                self._data = self._data[size:]
+                return chunk
+
+        def responder(data):
+            def _urlopen(request, timeout=None):
+                return FakeResponse(data)
+            return _urlopen
+
+        png = b"\x89PNG\r\n\x1a\n" + b"immagine finta"
+        entry = dict(self.entry, icon_url="https://example.invalid/icona.png")
+        with mock.patch.object(
+            self.mod.urllib.request, "urlopen", side_effect=responder(png)
+        ) as urlopen:
+            path = self.mod.cached_icon(entry)
+            self.assertIsNotNone(path)
+            self.assertTrue(os.path.isfile(path))
+            self.assertTrue(path.startswith(self.home))
+            self.assertIn("/.cache/hyleos-store/icons/obsidian/", path)
+            self.assertEqual(self.mod.cached_icon(entry), path)
+            self.assertEqual(urlopen.call_count, 1)
+
+        icon_dir = os.path.dirname(path)
+        before = sorted(os.listdir(icon_dir))
+        bad_png = b"GIF89a" + b"x" * 32
+        with mock.patch.object(
+            self.mod.urllib.request, "urlopen", side_effect=responder(bad_png)
+        ):
+            self.assertIsNone(
+                self.mod.cached_icon(dict(self.entry, icon_url="https://example.invalid/bad.png"))
+            )
+        self.assertEqual(sorted(os.listdir(icon_dir)), before)
+
+        huge = b"\x89PNG\r\n\x1a\n" + b"x" * (2 * 1024 * 1024)
+        with mock.patch.object(
+            self.mod.urllib.request, "urlopen", side_effect=responder(huge)
+        ):
+            self.assertIsNone(
+                self.mod.cached_icon(dict(self.entry, icon_url="https://example.invalid/huge.png"))
+            )
+        self.assertEqual(sorted(os.listdir(icon_dir)), before)
+
+    def test_cached_icon_rejects_non_https_and_empty(self):
+        with mock.patch.object(
+            self.mod.urllib.request, "urlopen", side_effect=AssertionError("nessuna rete attesa")
+        ) as urlopen:
+            for url in ("", "http://example.invalid/icona.png", "ftp://example.invalid/x.png"):
+                with self.subTest(url=url):
+                    self.assertIsNone(
+                        self.mod.cached_icon(dict(self.entry, icon_url=url))
+                    )
+            self.assertEqual(urlopen.call_count, 0)
+
+    def test_cached_icon_refuses_symlinked_cache_dir(self):
+        outside = os.path.join(self.tmp.name, "fuori-home")
+        os.makedirs(outside)
+        cache = os.path.join(self.home, ".cache")
+        os.symlink(outside, cache)
+        entry = dict(self.entry, icon_url="https://example.invalid/icona.png")
+        with mock.patch.object(
+            self.mod.urllib.request, "urlopen", side_effect=AssertionError("nessuna rete attesa")
+        ):
+            self.assertIsNone(self.mod.cached_icon(entry))
+        self.assertEqual(os.listdir(outside), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
