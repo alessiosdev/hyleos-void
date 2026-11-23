@@ -333,7 +333,7 @@ class DesktopEntryTest(unittest.TestCase):
             text = fh.read()
         self.assertNotIn(ALIAS_DESKTOP, text)
         self.assertIn(CANONICAL_DESKTOP, text)
-        self.assertIn("revision=4", text)
+        self.assertIn("revision=5", text)
 
 
 class GeneratedPayloadTest(unittest.TestCase):
@@ -353,6 +353,14 @@ class GeneratedPayloadTest(unittest.TestCase):
     def test_generated_rule_has_no_subject_active(self):
         with open(GENERATED_RULE, encoding="utf-8") as fh:
             self.assertNotIn("subject.active", fh.read())
+
+    def test_live_rule_uses_subject_user_property_in_overlay_and_payload(self):
+        for path in (RULE, GENERATED_RULE):
+            with self.subTest(path=path):
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                self.assertIn('subject.user == "anon"', text)
+                self.assertNotRegex(text, r"subject\.user\(\)")
 
 
 class PolicyTest(unittest.TestCase):
@@ -381,7 +389,8 @@ class PolicyTest(unittest.TestCase):
         with open(RULE, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn('action.id == "org.hyleos.installer.launch"', text)
-        self.assertIn('subject.user() == "anon"', text)
+        self.assertIn('subject.user == "anon"', text)
+        self.assertNotRegex(text, r"subject\.user\(\)")
         self.assertIn("polkit.Result.YES", text)
         self.assertNotIn("subject.active", text)
         self.assertIn("subject.local", text)

@@ -4,7 +4,7 @@
 // inerte sul sistema installato, dove valgono i defaults auth_admin.
 polkit.addRule(function(action, subject) {
     if (action.id == "org.hyleos.installer.launch" &&
-        subject.user() == "anon" &&
+        subject.user == "anon" &&
         subject.local) {
         return polkit.Result.YES;
     }

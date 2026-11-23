@@ -287,6 +287,36 @@ else
     echo "    ./build/build-repo.sh (richiede void-packages + xbps-src)."
 fi
 
+# A10 / ADR-0026: il checkout ha le directory dell'overlay con owner 1000:1003.
+# Il `cp -a` qui sopra preserva gli owner e mklive li ripropaga nel rootfs con
+# `cp -rfpPv` (il flag -p conserva owner/group). Normalizziamo quindi l'intero
+# overlay temporaneo a 0:0 prima di passarlo a mklive.
+# La normalizzazione e' qui e non subito dopo il `cp -a` perche' i blocchi
+# precedenti (chiave del repo, etc/xbps.d, runsvdir) scrivono in TEMP_OVERLAY
+# come utente corrente: con owner 0:0 e mode 755 quelle scritture fallirebbero
+# con EPERM e, con `set -e`, interromperebbero la build. Da qui a mklive non
+# viene scritto nulla nell'overlay.
+echo "[*] Normalizzazione owner/group dell'overlay temporaneo a 0:0..."
+$PRIV_CMD chown -R 0:0 "$TEMP_OVERLAY"
+
+# Verifica read-only delle directory di sistema prima del passaggio a mklive.
+for _sys_dir in home etc usr etc/runit/runsvdir var/service; do
+    if [ -e "$TEMP_OVERLAY/$_sys_dir" ] || [ -L "$TEMP_OVERLAY/$_sys_dir" ]; then
+        _sys_owner="$(stat -c '%u:%g' "$TEMP_OVERLAY/$_sys_dir")"
+        if [ "$_sys_owner" != "0:0" ]; then
+            echo "ERRORE: $_sys_dir in TEMP_OVERLAY e' $_sys_owner (atteso 0:0)." >&2
+            exit 1
+        fi
+        echo "[OK] $_sys_dir = 0:0 nell'overlay temporaneo"
+    fi
+done
+_bad_sys_dir="$(find "$TEMP_OVERLAY" -xdev -type d \( ! -uid 0 -o ! -gid 0 \) -print -quit)"
+if [ -n "$_bad_sys_dir" ]; then
+    echo "ERRORE: directory dell'overlay temporaneo non 0:0: $_bad_sys_dir" >&2
+    exit 1
+fi
+echo "[OK] tutte le directory dell'overlay temporaneo risultano 0:0"
+
 cd "$MKLIVE_DIR"
 
 # gptfdisk (sgdisk) e psmisc (fuser) sono richiesti dal preflight

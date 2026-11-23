@@ -147,6 +147,58 @@ done
 [ "$errors" -eq 0 ] && ok "file obbligatori presenti"
 
 # ---------------------------------------------------------------------------
+section "Regole Polkit"
+
+POLKIT_BAD_METHODS='subject[[:space:]]*\.[[:space:]]*(user|active|local|isActive|isLocal|get[A-Za-z0-9_]*)[[:space:]]*\('
+LIVE_RULE="$OVERLAY/usr/share/polkit-1/rules.d/50-hyleos-installer-live.rules"
+mapfile -t rules < <(find "$OVERLAY" -name '*.rules' -type f | sort)
+for f in "${rules[@]}"; do
+    if bad=$(grep -nE "$POLKIT_BAD_METHODS" "$f"); then
+        err "metodo Polkit inesistente in: ${f#$ROOT_DIR/}"
+        echo "$bad" | sed 's/^/      /' >&2
+    fi
+done
+if grep -qE "$POLKIT_BAD_METHODS" "$LIVE_RULE"; then
+    err "regola live contiene un metodo Polkit inesistente"
+fi
+if grep -qF 'subject.user == "anon"' "$LIVE_RULE"; then
+    ok "regola live usa subject.user come proprieta'"
+else
+    err 'regola live senza subject.user == "anon"'
+fi
+[ "$errors" -eq 0 ] && ok "${#rules[@]} file .rules Polkit verificati"
+
+# ---------------------------------------------------------------------------
+section "Own overlay (A10)"
+
+MKISO="$ROOT_DIR/build/mkiso.sh"
+if [ -f "$MKISO" ]; then
+    mkiso_code=$(grep -vE '^[[:space:]]*#' "$MKISO")
+    if printf '%s\n' "$mkiso_code" | grep -qE '[$]PRIV_CMD[[:space:]]+chown[[:space:]]+-R[[:space:]]+0:0[[:space:]]+"?[$]TEMP_OVERLAY"?'; then
+        ok 'mkiso.sh: normalizzazione $PRIV_CMD chown -R 0:0 presente'
+    else
+        err 'mkiso.sh: manca $PRIV_CMD chown -R 0:0 "$TEMP_OVERLAY" (A10, ADR-0026/0027)'
+    fi
+    if printf '%s\n' "$mkiso_code" | grep -qE 'for[[:space:]]+_sys_dir[[:space:]]+in[[:space:]]+home[[:space:]]+etc[[:space:]]+usr[[:space:]]+etc/runit/runsvdir[[:space:]]+var/service[[:space:]]*;[[:space:]]*do'; then
+        ok "mkiso.sh: loop directory di sistema presente"
+    else
+        err "mkiso.sh: manca il loop home etc usr etc/runit/runsvdir var/service (A10, ADR-0026/0027)"
+    fi
+    if printf '%s\n' "$mkiso_code" | grep -qE '[$]_sys_owner"[[:space:]]*!=[[:space:]]*"0:0"'; then
+        ok "mkiso.sh: verifica _sys_owner != 0:0 presente"
+    else
+        err 'mkiso.sh: manca la verifica _sys_owner != "0:0" (A10, ADR-0026/0027)'
+    fi
+    if printf '%s\n' "$mkiso_code" | grep -qE 'find[[:space:]]+"?[$]TEMP_OVERLAY"?.*![[:space:]]*-uid[[:space:]]+0.*![[:space:]]*-gid[[:space:]]+0'; then
+        ok "mkiso.sh: controllo find ! -uid 0 -o ! -gid 0 presente"
+    else
+        err "mkiso.sh: manca il controllo find ! -uid 0 -o ! -gid 0 (A10, ADR-0026/0027)"
+    fi
+else
+    err "mkiso.sh non trovato: $MKISO (A10, ADR-0026/0027)"
+fi
+
+# ---------------------------------------------------------------------------
 section "Sintassi Python"
 
 mapfile -t py_files < <(find "$OVERLAY" -name '*.py' -type f | sort)
