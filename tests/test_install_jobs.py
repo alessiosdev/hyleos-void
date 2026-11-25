@@ -192,12 +192,17 @@ class FakeDiskManager:
     """DiskManager con esito configurabile per i controlli di J1."""
 
     def __init__(self, is_live=False, identity="identity-A", inspected=None,
-                 size=64 * 1024**3, mounts=None):
+                 size=64 * 1024**3, mounts=None, swaps=None,
+                 release_failures=None, runner=None):
         self._is_live = is_live
         self._identity = identity
         self._inspected = inspected if inspected is not None else {"size": size, "ro": 0}
         self._size = size
         self._mounts = mounts or []
+        self._swaps = swaps or []
+        self.release_failures = list(release_failures or [])
+        self.release_calls = []
+        self._runner = runner
         self.unmount_calls = []
 
     def is_live_disk(self, disk):
@@ -218,6 +223,21 @@ class FakeDiskManager:
     def unmount_disk(self, disk):
         self.unmount_calls.append(disk)
         return []
+
+    def release_disk(self, disk):
+        self.release_calls.append(disk)
+        if self._runner is not None:
+            for swap in self._swaps:
+                self._runner.run(["swapoff", swap], check=False)
+            targets = []
+            for item in self._mounts:
+                target = item[1] if isinstance(item, (tuple, list)) and len(item) > 1 else item
+                if target and target not in targets:
+                    targets.append(target)
+            for target in targets:
+                self._runner.run(["umount", target], check=False)
+            self._runner.run(["udevadm", "settle", "--timeout=10"], check=False)
+        return [tuple(failure) for failure in self.release_failures]
 
 
 class JobOrderTest(unittest.TestCase):
@@ -389,6 +409,199 @@ class PartitionNamingTest(unittest.TestCase):
         ctx = make_ctx("/tmp/unused", exists=lambda _path: False)
         with self.assertRaises(jobs.TargetSetupError):
             jobs.PartitionJob().run(ctx)
+
+
+class ReleaseAndBusyTest(unittest.TestCase):
+    BUSY_STDERR = "blockdev: ioctl error on BLKRRPART: Device or resource busy"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="hyleos-a2-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+
+    def _prepare_ctx(self, runner, ui, dm=None, exists=None):
+        ctx = make_ctx(self.root, runner=runner, ui=ui, exists=exists)
+        if dm is not None:
+            ctx.disk_manager = dm
+        return ctx
+
+    def test_release_disk_runs_before_wipefs(self):
+        runner = FakeRunner()
+        ui = RecordingUI()
+        dm = FakeDiskManager(mounts=[("/dev/sda2", "/mnt/target")],
+                             swaps=["/dev/sda3"], runner=runner)
+        ctx = self._prepare_ctx(runner, ui, dm)
+        jobs.PrepareDiskJob().run(ctx)
+
+        self.assertEqual(dm.release_calls, ["/dev/sda"])
+        commands = [argv for argv, _kwargs in runner.commands]
+        wipe = commands.index(["wipefs", "--all", "--force", "/dev/sda"])
+        self.assertLess(commands.index(["swapoff", "/dev/sda3"]), wipe)
+        self.assertLess(commands.index(["umount", "/mnt/target"]), wipe)
+        settle = next(i for i, argv in enumerate(commands)
+                      if argv[:2] == ["udevadm", "settle"])
+        self.assertLess(settle, wipe)
+
+    def test_release_failure_is_fail_closed_and_mentions_mountpoint(self):
+        runner = FakeRunner()
+        ui = RecordingUI()
+        dm = FakeDiskManager(
+            mounts=[("/dev/sda2", "/mnt/residuo")],
+            release_failures=[("/mnt/residuo", "mount ancora attivo")],
+            runner=runner,
+        )
+        ctx = self._prepare_ctx(runner, ui, dm)
+        with self.assertRaises(DiskValidationError) as caught:
+            jobs.PrepareDiskJob().run(ctx)
+
+        self.assertIn("/mnt/residuo", str(caught.exception))
+        self.assertFalse(runner.has("wipefs"))
+        self.assertEqual(dm.release_calls, ["/dev/sda"])
+
+    def test_prepare_disk_tolerates_blockdev_busy(self):
+        runner = FakeRunner({
+            ("blockdev", "--rereadpt", "/dev/sda"): FakeResult(
+                rc=1, stderr=self.BUSY_STDERR),
+        })
+        ui = RecordingUI()
+        ctx = self._prepare_ctx(runner, ui)
+        jobs.PrepareDiskJob().run(ctx)
+
+        self.assertTrue(runner.has("partprobe"))
+        self.assertTrue(any(level == "WARN" and "blockdev" in message
+                            for level, message in ui.logs))
+
+    def test_partition_tolerates_blockdev_busy(self):
+        runner = FakeRunner({
+            ("blockdev", "--rereadpt", "/dev/sda"): FakeResult(
+                rc=1, stderr=self.BUSY_STDERR),
+        })
+        ui = RecordingUI()
+        ctx = self._prepare_ctx(
+            runner, ui, exists=lambda path: path in ("/dev/sda1", "/dev/sda2"))
+        jobs.PartitionJob().run(ctx)
+
+        self.assertEqual(ctx.partitions.p1, "/dev/sda1")
+        self.assertEqual(ctx.partitions.p2, "/dev/sda2")
+        self.assertTrue(any(level == "WARN" and "blockdev" in message
+                            for level, message in ui.logs))
+
+    def test_prepare_disk_tolerates_missing_blockdev(self):
+        def missing_blockdev(_argv, _kwargs):
+            raise FileNotFoundError("blockdev")
+
+        runner = FakeRunner({
+            ("blockdev", "--rereadpt", "/dev/sda"): missing_blockdev,
+        })
+        ui = RecordingUI()
+        ctx = self._prepare_ctx(runner, ui)
+        jobs.PrepareDiskJob().run(ctx)
+
+        self.assertTrue(runner.has("partprobe"))
+        self.assertTrue(any(level == "WARN" and "blockdev" in message
+                            and "non disponibile" in message
+                            for level, message in ui.logs))
+
+    def test_partition_tolerates_missing_blockdev(self):
+        def missing_blockdev(_argv, _kwargs):
+            raise FileNotFoundError("blockdev")
+
+        runner = FakeRunner({
+            ("blockdev", "--rereadpt", "/dev/sda"): missing_blockdev,
+        })
+        ui = RecordingUI()
+        ctx = self._prepare_ctx(
+            runner, ui, exists=lambda path: path in ("/dev/sda1", "/dev/sda2"))
+        jobs.PartitionJob().run(ctx)
+
+        self.assertEqual(ctx.partitions.p1, "/dev/sda1")
+        self.assertEqual(ctx.partitions.p2, "/dev/sda2")
+        self.assertTrue(any(level == "WARN" and "blockdev" in message
+                            and "non disponibile" in message
+                            for level, message in ui.logs))
+
+    def test_partx_retries_three_times_on_busy(self):
+        calls = []
+
+        def partx_response(_argv, _kwargs):
+            calls.append(1)
+            if len(calls) < 3:
+                return FakeResult(rc=1, stderr="partx: BLKRRPART Device or resource busy")
+            return FakeResult(rc=0)
+
+        runner = FakeRunner({("partx", "-u", "/dev/sda"): partx_response})
+        ui = RecordingUI()
+        ctx = self._prepare_ctx(runner, ui)
+        jobs.PartitionJob().run(ctx)
+
+        self.assertEqual(len(runner.argv("partx")), 3)
+        self.assertEqual(len(calls), 3)
+
+    def test_real_disk_manager_release_disk_with_fake_runner(self):
+        from installer.core import disk_manager as disk_manager_mod
+
+        path_calls = []
+        point_calls = []
+
+        def paths_response(_argv, _kwargs):
+            path_calls.append(1)
+            return FakeResult(stdout="/dev/sda1\n/dev/sda2\n/dev/sda3\n")
+
+        def points_response(_argv, _kwargs):
+            point_calls.append(1)
+            if len(point_calls) <= 2:
+                return FakeResult(stdout=(
+                    "/dev/sda1 [SWAP]\n"
+                    "/dev/sda2 /mnt/target\n"
+                    "/dev/sda3 /mnt/target/nested\n"
+                ))
+            return FakeResult(stdout="")
+
+        runner = FakeRunner({
+            ("lsblk", "-ln", "-o", "PATH", "/dev/sda"): paths_response,
+            ("lsblk", "-ln", "-o", "PATH,MOUNTPOINT", "/dev/sda"): points_response,
+        })
+        manager = disk_manager_mod.DiskManager(runner=runner)
+        with mock.patch.object(manager, "inspect_disk",
+                               side_effect=OSError("no real disk in unit test")):
+            failures = manager.release_disk("/dev/sda")
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(path_calls), 2)
+        self.assertEqual(len(point_calls), 4)
+        self.assertEqual(runner.argv("swapoff"), [["swapoff", "/dev/sda1"]])
+        self.assertEqual(runner.argv("umount"), [
+            ["umount", "/mnt/target/nested"],
+            ["umount", "/mnt/target"],
+        ])
+        self.assertTrue(runner.has("udevadm"))
+
+    def test_release_disk_detects_child_mounted_after_settle(self):
+        from installer.core import disk_manager as disk_manager_mod
+
+        path_calls = []
+
+        def paths_response(_argv, _kwargs):
+            path_calls.append(1)
+            if len(path_calls) == 1:
+                return FakeResult(stdout="/dev/sda1\n")
+            return FakeResult(stdout="/dev/sda1\n/dev/sda2\n")
+
+        def points_response(_argv, _kwargs):
+            return FakeResult(stdout="/dev/sda2 /mnt/target\n")
+
+        runner = FakeRunner({
+            ("lsblk", "-ln", "-o", "PATH", "/dev/sda"): paths_response,
+            ("lsblk", "-ln", "-o", "PATH,MOUNTPOINT", "/dev/sda"): points_response,
+        })
+        manager = disk_manager_mod.DiskManager(runner=runner)
+        with mock.patch.object(manager, "inspect_disk",
+                               side_effect=OSError("no real disk in unit test")):
+            failures = manager.release_disk("/dev/sda")
+
+        self.assertEqual([name for name, _error in failures], ["/mnt/target"])
+        self.assertIn("mount ancora attivo: /mnt/target", failures[0][1])
+        self.assertEqual(len(path_calls), 2)
 
 
 class FstabTest(unittest.TestCase):

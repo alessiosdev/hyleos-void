@@ -4,6 +4,7 @@ import os
 import re
 import json
 import stat
+import time
 import subprocess
 
 try:
@@ -404,6 +405,148 @@ class DiskManager:
             except Exception as exc:
                 self._log(f"unmount_disk: umount {target} fallito: {exc}", "WARN")
                 failures.append((target, str(exc)))
+        return failures
+
+    def _child_paths(self, disk):
+        """Tutti i figli del disco, compresi quelli dei figli; il disco e' escluso."""
+        try:
+            rc, out, stderr = _result(self.runner.run(
+                ["lsblk", "-ln", "-o", "PATH", disk], check=False
+            ))
+        except Exception as exc:
+            rc, out, stderr = 1, "", str(exc)
+        if rc == 0 and out.strip():
+            paths = []
+            for token in out.split():
+                path = self._dev_path(token)
+                if path and path != self._dev_path(disk) and path not in paths:
+                    paths.append(path)
+            return paths
+        # Fallback sull'albero JSON gia' usato da inspect_disk/disk_mounts.
+        if rc:
+            self._log(f"release_disk: lsblk PATH fallito, uso l'albero JSON: {stderr.strip()}", "WARN")
+        try:
+            dev = self.inspect_disk(disk)
+        except Exception as exc:
+            self._log(f"release_disk: enumerazione figli non riuscita: {exc}", "WARN")
+            return []
+        paths = []
+
+        def walk(node):
+            for child in node.get("children") or []:
+                path = self._dev_path(child.get("path"))
+                if path and path not in paths:
+                    paths.append(path)
+                walk(child)
+
+        walk(dev)
+        return paths
+
+    def _lsblk_points(self, disk):
+        """Coppie (device, mountpoint) riportate da lsblk; [SWAP] per le swap."""
+        try:
+            rc, out, stderr = _result(self.runner.run(
+                ["lsblk", "-ln", "-o", "PATH,MOUNTPOINT", disk], check=False
+            ))
+        except Exception as exc:
+            self._log(f"release_disk: lsblk MOUNTPOINT fallito: {exc}", "WARN")
+            return []
+        if rc:
+            return []
+        points = []
+        for line in out.splitlines():
+            fields = line.split(None, 1)
+            if not fields:
+                continue
+            path = self._dev_path(fields[0])
+            point = fields[1].strip() if len(fields) > 1 else ""
+            if path and point and (path, point) not in points:
+                points.append((path, point))
+        return points
+
+    def _swap_targets(self, disk, children):
+        """Swap attive sui figli del disco, senza duplicati."""
+        targets = []
+        try:
+            found = self.swap_partitions(disk) or []
+        except Exception as exc:
+            self._log(f"release_disk: swap_partitions fallita: {exc}", "WARN")
+            found = []
+        for path in found:
+            path = self._dev_path(path)
+            if path and (not children or path in children) and path not in targets:
+                targets.append(path)
+        for path, point in self._lsblk_points(disk):
+            if point == "[SWAP]" and (not children or path in children) and path not in targets:
+                targets.append(path)
+        return targets
+
+    def _mount_targets(self, disk, children):
+        """Mountpoint dei figli, ordinati dal piu' profondo (deepest-first)."""
+        points = set()
+        try:
+            found = self.disk_mounts(disk) or []
+        except Exception as exc:
+            self._log(f"release_disk: disk_mounts fallita: {exc}", "WARN")
+            found = []
+        for path, point in found:
+            path = self._dev_path(path)
+            if path and (not children or path in children) and point and point != "[SWAP]":
+                points.add(point)
+        for path, point in self._lsblk_points(disk):
+            if point != "[SWAP]" and (not children or path in children):
+                points.add(point)
+        return sorted(points, key=len, reverse=True)
+
+    def _release_targets(self, command, targets, failures):
+        """Esegue swapoff/umount su ogni target, con un retry su busy."""
+        for target in targets:
+            result = self.runner.run([command, target], check=False)
+            rc, _out, stderr = _result(result)
+            if rc and "busy" in (stderr or "").lower():
+                time.sleep(0.5)
+                result = self.runner.run([command, target], check=False)
+                rc, _out, stderr = _result(result)
+            if rc:
+                detail = (stderr or "").strip() or f"rc {rc}"
+                failures.append((target, detail))
+                self._log(f"release_disk: {command} {target} fallito: {detail}", "WARN")
+            else:
+                self._log(f"release_disk: {command} {target} OK")
+
+    def release_disk(self, disk: str) -> list[tuple[str, str]]:
+        """Rilascia swap e mount dei figli di ``disk`` prima della scrittura.
+
+        Restituisce ``(target, errore)`` per cio' che non e' stato rilasciato;
+        una lista vuota significa disco pronto. Il disco stesso non viene mai
+        smontato: puo' essere la root live o il target di installazione.
+        """
+        failures = []
+        children = self._child_paths(disk)
+        swaps = self._swap_targets(disk, children)
+        mounts = self._mount_targets(disk, children)
+        self._release_targets("swapoff", swaps, failures)
+        self._release_targets("umount", mounts, failures)
+        result = self.runner.run(["udevadm", "settle", "--timeout=10"], check=False)
+        rc, _out, stderr = _result(result)
+        if rc:
+            detail = (stderr or "").strip() or f"rc {rc}"
+            self._log(f"release_disk: udevadm settle fallito: {detail}", "WARN")
+
+        children = self._child_paths(disk)
+        # Verifica finale fail-closed: rilegge mount e swap dopo il settle.
+        def add_residual(target, note):
+            for i, (name, error) in enumerate(failures):
+                if name == target:
+                    if note not in error:
+                        failures[i] = (target, f"{error}; {note}")
+                    return
+            failures.append((target, note))
+
+        for path in self._swap_targets(disk, children):
+            add_residual(path, f"swap ancora attiva: {path}")
+        for point in self._mount_targets(disk, children):
+            add_residual(point, f"mount ancora attivo: {point}")
         return failures
 
     def get_mounted_parts(self, disk):

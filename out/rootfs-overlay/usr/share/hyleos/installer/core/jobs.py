@@ -109,6 +109,14 @@ def _rc(result) -> int:
     return int(rc or 0)
 
 
+def _stderr(result) -> str:
+    return getattr(result, "stderr", "") or ""
+
+
+def _is_busy(result) -> bool:
+    return "busy" in (_stdout(result) + " " + _stderr(result)).lower()
+
+
 def _read(path: str) -> str:
     with open(path, encoding="utf-8") as handle:
         return handle.read()
@@ -176,6 +184,24 @@ def _disk_mounts(ctx, disk: str) -> list:
     if callable(detailed):
         return list(detailed(disk) or [])
     return [(part, "") for part in manager.get_mounted_parts(disk)]
+
+
+def _release_disk(ctx, disk: str) -> list[tuple[str, str]]:
+    """Rilascia il disco prima di scriverci: swapoff, umount e settle."""
+    manager = ctx.disk_manager
+    release = getattr(manager, "release_disk", None)
+    if callable(release):
+        return list(release(disk) or [])
+    failures = []
+    for swap_part in _swap_partitions(ctx, disk):
+        result = ctx.run(["swapoff", swap_part], check=False)
+        if _rc(result) != 0:
+            failures.append((swap_part, _stderr(result).strip() or f"rc {_rc(result)}"))
+    unmount = getattr(manager, "unmount_disk", None)
+    if callable(unmount):
+        failures.extend(unmount(disk) or [])
+    ctx.run(["udevadm", "settle", "--timeout=10"], check=False)
+    return failures
 
 
 def _dracut_candidate_files(ctx) -> list[str]:
@@ -407,13 +433,36 @@ class PrepareDiskJob(Job):
     def _execute(self, ctx) -> None:
         disk = ctx.disk
         ctx.ui.log("INFO", "Preparazione disco...")
-        for swap_part in _swap_partitions(ctx, disk):
-            ctx.run(["swapoff", swap_part])
+        failures = _release_disk(ctx, disk)
+        if failures:
+            raise DiskValidationError(
+                "Rilascio disco incompleto: mount/swap residui su "
+                + ", ".join(f"{target} ({error})" for target, error in failures)
+            )
         ctx.run(["wipefs", "--all", "--force", disk])
         ctx.run(["sgdisk", "--zap-all", disk])
+        ctx.run(["udevadm", "settle", "--timeout=10"], check=False)
         ctx.run(["partprobe", disk])
-        ctx.run(["blockdev", "--rereadpt", disk])
-        ctx.run(["udevadm", "settle", "--timeout=15"], check=False)
+        try:
+            reread = ctx.run(["blockdev", "--rereadpt", disk], check=False)
+        except Exception as exc:
+            ctx.ui.log(
+                "WARN",
+                f"blockdev --rereadpt non disponibile su {disk} ({exc}): "
+                "partprobe ha aggiornato la tabella, proseguo in best-effort",
+            )
+        else:
+            if _rc(reread) != 0:
+                detail = _stderr(reread).strip() or f"rc {_rc(reread)}"
+                if _is_busy(reread):
+                    ctx.ui.log(
+                        "WARN",
+                        f"blockdev --rereadpt ignorato su {disk} ({detail}): "
+                        "partprobe ha aggiornato la tabella, proseguo in best-effort",
+                    )
+                else:
+                    ctx.ui.log("WARN", f"blockdev --rereadpt best-effort fallito su {disk}: {detail}")
+        ctx.run(["udevadm", "settle", "--timeout=10"], check=False)
         ctx.sleep(2)
 
 
@@ -432,9 +481,39 @@ class PartitionJob(Job):
         ctx.run(["parted", "-s", disk, "mkpart", "HyleOS", "ext4", "513MiB", "100%"])
 
         ctx.run(["partprobe", disk])
-        ctx.run(["blockdev", "--rereadpt", disk])
-        ctx.run(["udevadm", "settle", "--timeout=15"], check=False)
-        ctx.sleep(2)
+        partx_error = ""
+        for attempt in range(3):
+            result = ctx.run(["partx", "-u", disk], check=False)
+            if _rc(result) == 0:
+                partx_error = ""
+                break
+            partx_error = _stderr(result).strip() or f"rc {_rc(result)}"
+            if not _is_busy(result) or attempt == 2:
+                break
+            ctx.sleep(1)
+        if partx_error:
+            ctx.ui.log("WARN", f"partx -u best-effort su {disk} non riuscito: {partx_error}")
+        ctx.run(["udevadm", "settle", "--timeout=10"], check=False)
+        try:
+            reread = ctx.run(["blockdev", "--rereadpt", disk], check=False)
+        except Exception as exc:
+            ctx.ui.log(
+                "WARN",
+                f"blockdev --rereadpt non disponibile su {disk} ({exc}): "
+                "partprobe ha aggiornato la tabella, proseguo con la verifica dei nodi",
+            )
+        else:
+            if _rc(reread) != 0:
+                detail = _stderr(reread).strip() or f"rc {_rc(reread)}"
+                if _is_busy(reread):
+                    ctx.ui.log(
+                        "WARN",
+                        f"blockdev --rereadpt ignorato su {disk} ({detail}): "
+                        "partprobe ha aggiornato la tabella, proseguo con la verifica dei nodi",
+                    )
+                else:
+                    ctx.ui.log("WARN", f"blockdev --rereadpt best-effort fallito su {disk}: {detail}")
+        ctx.run(["udevadm", "settle", "--timeout=10"], check=False)
 
         # Detect partition names (nvme0n1p1 vs sda1)
         naming = "p" if ("nvme" in disk or "mmcblk" in disk or "loop" in disk) else ""

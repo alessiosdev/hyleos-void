@@ -333,7 +333,7 @@ class DesktopEntryTest(unittest.TestCase):
             text = fh.read()
         self.assertNotIn(ALIAS_DESKTOP, text)
         self.assertIn(CANONICAL_DESKTOP, text)
-        self.assertIn("revision=5", text)
+        self.assertIn("revision=6", text)
 
 
 class GeneratedPayloadTest(unittest.TestCase):
