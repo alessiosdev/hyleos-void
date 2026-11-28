@@ -37,7 +37,8 @@ echo "[*] Sincronizzazione payload pacchetti dall'overlay..."
 # --- hyleos-session ---------------------------------------------------------
 reset_files hyleos-session
 F="$PKG_DIR/hyleos-session/files"
-mkdir -p "$F/bin" "$F/libexec/hyleos" "$F/profile.d" "$F/polkit"
+mkdir -p "$F/bin" "$F/libexec/hyleos" "$F/profile.d" "$F/polkit" "$F/greetd" \
+         "$F/sv/hyleos-greetd" "$F/share/wayland-sessions"
 copy usr/bin/hyleos-session        "$F/bin/hyleos-session"
 copy usr/bin/hyleos-config-migrate "$F/bin/hyleos-config-migrate"
 copy usr/bin/hyleos-dms-start      "$F/bin/hyleos-dms-start"
@@ -45,6 +46,11 @@ copy usr/bin/hyleos-system-update        "$F/bin/hyleos-system-update"
 copy usr/bin/hyleos-window-mode          "$F/bin/hyleos-window-mode"
 copy usr/libexec/hyleos/kernel-cleanup   "$F/libexec/hyleos/kernel-cleanup"
 copy etc/profile.d/hyleos-session.sh     "$F/profile.d/hyleos-session.sh"
+copy etc/sv/hyleos-greetd/run            "$F/sv/hyleos-greetd/run"
+copy etc/greetd/hyleos-config.toml       "$F/greetd/hyleos-config.toml"
+copy etc/greetd/regreet.css              "$F/greetd/regreet.css"
+copy usr/share/wayland-sessions/hyleos.desktop \
+     "$F/share/wayland-sessions/hyleos.desktop"
 copy usr/share/polkit-1/actions/org.hyleos.update.system.policy \
      "$F/polkit/org.hyleos.update.system.policy"
 
@@ -96,10 +102,11 @@ copy usr/share/applications/org.hyleos.welcome.desktop "$F/applications/org.hyle
 # --- hyleos-theme -----------------------------------------------------------
 reset_files hyleos-theme
 F="$PKG_DIR/hyleos-theme/files"
-mkdir -p "$F/hyleos" "$F/backgrounds"
+mkdir -p "$F/hyleos" "$F/backgrounds" "$F/icons"
 copy usr/share/hyleos/assets "$F/hyleos/assets"
 copy usr/share/hyleos/themes "$F/hyleos/themes"
 copy usr/share/backgrounds/hyleos "$F/backgrounds/hyleos"
+copy usr/share/icons/hicolor "$F/icons/hicolor"
 
 # --- hyleos-desktop (default di sistema, mai in ~/.config) ------------------
 reset_files hyleos-desktop

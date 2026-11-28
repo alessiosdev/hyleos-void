@@ -23,3 +23,9 @@ etc/xdg/quickshell/hyleos-dms/Modules/Settings/WorkspacesTab.qml
 etc/xdg/quickshell/hyleos-dms/Modules/Settings/SystemUpdaterTab.qml
 etc/xdg/quickshell/hyleos-dms/Modals/Settings/SettingsSidebar.qml
 etc/xdg/quickshell/hyleos-dms/Modals/Settings/SettingsContent.qml
+etc/xdg/quickshell/hyleos-dms/Common/Paths.qml
+etc/xdg/quickshell/hyleos-dms/Widgets/LauncherLogo.qml
+etc/xdg/quickshell/hyleos-dms/Widgets/DankBackdrop.qml
+etc/xdg/quickshell/hyleos-dms/Modals/Greeter/GreeterWelcomePage.qml
+etc/xdg/quickshell/hyleos-dms/Modals/Changelog/ChangelogContent.qml
+etc/xdg/quickshell/hyleos-dms/Services/AppSearchService.qml

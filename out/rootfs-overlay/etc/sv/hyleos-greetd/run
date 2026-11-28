@@ -1,0 +1,6 @@
+#!/bin/sh
+sv check dbus >/dev/null || exit 1
+if [ -e /var/service/elogind ]; then sv check elogind >/dev/null || exit 1; fi
+install -d -m 0700 -o _greeter -g _greeter /var/lib/regreet /var/log/regreet
+plymouth quit --retain-splash 2>/dev/null || true
+exec greetd --config /etc/greetd/hyleos-config.toml

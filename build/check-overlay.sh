@@ -136,6 +136,13 @@ REQUIRED=(
     "usr/share/polkit-1/rules.d/50-hyleos-installer-live.rules"
     "etc/xdg/quickshell/hyleos-dms/shell.qml"
     "etc/xdg/quickshell/hyleos-dms/Common/SettingsData.qml"
+    "etc/sv/hyleos-greetd/run"
+    "etc/greetd/hyleos-config.toml"
+    "etc/greetd/regreet.css"
+    "usr/share/wayland-sessions/hyleos.desktop"
+    "usr/share/icons/hicolor/scalable/apps/hyleos-installer.svg"
+    "usr/share/icons/hicolor/scalable/apps/hyleos-store.svg"
+    "usr/share/icons/hicolor/scalable/apps/hyle-welcome.svg"
 )
 for f in "${REQUIRED[@]}"; do
     [ -e "$OVERLAY/$f" ] || err "manca: $f"
@@ -145,6 +152,39 @@ for f in usr/bin/hyleos-session usr/bin/hyleos-dms-start usr/bin/hyleos-config-m
     [ -x "$OVERLAY/$f" ] || err "non eseguibile: $f"
 done
 [ "$errors" -eq 0 ] && ok "file obbligatori presenti"
+
+# ---------------------------------------------------------------------------
+section "Greetd HyleOS (ADR-0050 / contratto rev.4)"
+
+GREETD_RUN="$OVERLAY/etc/sv/hyleos-greetd/run"
+if [ -f "$GREETD_RUN" ]; then
+    if [ -x "$GREETD_RUN" ]; then
+        ok "eseguibile: etc/sv/hyleos-greetd/run"
+    else
+        err "non eseguibile: etc/sv/hyleos-greetd/run"
+    fi
+    _greetd_mode="$(stat -c '%a' "$GREETD_RUN" 2>/dev/null || true)"
+    if [ "$_greetd_mode" = "755" ]; then
+        ok "mode 755: etc/sv/hyleos-greetd/run"
+    else
+        err "mode $_greetd_mode (atteso 755): etc/sv/hyleos-greetd/run"
+    fi
+    if sh -n "$GREETD_RUN" 2>/tmp/hyleos-greetd-sh.err; then
+        ok "sh -n: etc/sv/hyleos-greetd/run"
+    else
+        err "sh -n fallito: etc/sv/hyleos-greetd/run"
+        sed 's/^/      /' /tmp/hyleos-greetd-sh.err >&2
+    fi
+fi
+
+# Nessun path condiviso con il pacchetto Void greetd.
+for f in etc/sv/greetd/run etc/greetd/config.toml; do
+    if [ -e "$OVERLAY/$f" ] || [ -L "$OVERLAY/$f" ]; then
+        err "percorso condiviso vietato presente: $f"
+    else
+        ok "$f assente"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 section "Regole Polkit"

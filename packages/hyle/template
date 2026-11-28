@@ -1,7 +1,7 @@
 # Ricetta xbps-src — hyle (assistente CLI) e hyle-welcome
 pkgname=hyle
 version=1.0.0
-revision=3
+revision=4
 short_desc="HyleOS - assistente CLI (update, clean, repair) e benvenuto"
 maintainer="Hyle OS Team"
 license="MIT"

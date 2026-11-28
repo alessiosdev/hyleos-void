@@ -1,7 +1,7 @@
 # Ricetta xbps-src per il meta-pacchetto di sistema base Hyle OS
 pkgname=hyleos-base
 version=1.0.0
-revision=2
+revision=3
 short_desc="Hyle OS - Sistema base (kernel, driver, librerie core, terminale dev)"
 maintainer="Hyle OS Team"
 license="MIT"
@@ -13,8 +13,12 @@ metapackage=yes
 depends="
   linux>=6.6
   linux-firmware
+  sof-firmware
+  intel-ucode
   mesa
   mesa-dri
+  mesa-vaapi
+  intel-media-driver
   libdrm
   wayland
   libgbm
@@ -26,7 +30,10 @@ depends="
   dbus
   elogind
   fuse
+  exfatprogs
+  ntfs-3g
   polkit
+  void-repo-nonfree
   xdg-user-dirs
   fontconfig
   kitty

@@ -5,7 +5,7 @@
 # (vedi hyleos-config-migrate).
 pkgname=hyleos-desktop
 version=1.1.0
-revision=4
+revision=5
 short_desc="HyleOS - desktop Hyprland + DMS e default di sistema"
 maintainer="Hyle OS Team"
 license="MIT"
@@ -30,6 +30,7 @@ depends="
   adwaita-icon-theme
   accountsservice
   power-profiles-daemon
+  cups
   cups-pk-helper
   matugen
   cava

@@ -4,7 +4,7 @@
 # manutenzione del sistema (aggiornamento unico, pulizia kernel).
 pkgname=hyleos-session
 version=1.0.0
-revision=3
+revision=6
 short_desc="HyleOS - sessione utente, migrazione config e manutenzione"
 maintainer="Hyle OS Team"
 license="MIT"
@@ -29,5 +29,12 @@ do_install() {
     vinstall ${FILESDIR}/bin/hyleos-window-mode 755 usr/bin
     vinstall ${FILESDIR}/libexec/hyleos/kernel-cleanup 755 usr/libexec/hyleos
     vinstall ${FILESDIR}/profile.d/hyleos-session.sh 644 etc/profile.d
+    vmkdir etc/greetd
+    vinstall ${FILESDIR}/greetd/hyleos-config.toml 644 etc/greetd
+    vinstall ${FILESDIR}/greetd/regreet.css 644 etc/greetd
+    vmkdir etc/sv/hyleos-greetd
+    vinstall ${FILESDIR}/sv/hyleos-greetd/run 755 etc/sv/hyleos-greetd
+    vmkdir usr/share/wayland-sessions
+    vinstall ${FILESDIR}/share/wayland-sessions/hyleos.desktop 644 usr/share/wayland-sessions
     vinstall ${FILESDIR}/polkit/org.hyleos.update.system.policy 644 usr/share/polkit-1/actions
 }

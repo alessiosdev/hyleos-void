@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Hyle OS
+Comment=Sessione Wayland Hyle OS
+Exec=/usr/bin/hyleos-session
+Type=Application

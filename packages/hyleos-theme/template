@@ -4,7 +4,7 @@
 # wallpaper/logo non richiede di ricostruire hyleos-dms.
 pkgname=hyleos-theme
 version=1.0.0
-revision=1
+revision=2
 short_desc="HyleOS - tema, sfondi, logo e asset grafici"
 maintainer="Hyle OS Team"
 license="MIT"
@@ -14,7 +14,9 @@ do_install() {
     # vcopy usa cp -a: le directory di destinazione vanno create prima.
     vmkdir usr/share/hyleos
     vmkdir usr/share/backgrounds
+    vmkdir usr/share/icons
     vcopy ${FILESDIR}/hyleos/assets usr/share/hyleos
     vcopy ${FILESDIR}/hyleos/themes usr/share/hyleos
     vcopy ${FILESDIR}/backgrounds/hyleos usr/share/backgrounds
+    vcopy ${FILESDIR}/icons/hicolor usr/share/icons
 }

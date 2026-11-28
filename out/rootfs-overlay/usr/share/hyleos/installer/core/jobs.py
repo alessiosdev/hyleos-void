@@ -300,6 +300,40 @@ def _neutralize_dracut_live(ctx) -> None:
             ) from exc
 
 
+_TARGET_DISPLAY_PACKAGES = ("greetd", "ReGreet", "cage", "cups")
+
+
+def _check_target_display_packages(ctx) -> None:
+    """Verifica offline che i pacchetti del grafico siano già nel target."""
+    root = ctx.paths.root
+    for package in _TARGET_DISPLAY_PACKAGES:
+        installed = ctx.run(["xbps-query", "-r", root, package], check=False)
+        if _rc(installed) != 0:
+            raise ConfigurationError(
+                f"Pacchetto '{package}' non installato nel target: l'installazione offline "
+                "non puo' scaricare pacchetti. Verificare l'immagine di installazione."
+            )
+    ctx.ui.log("INFO", "Pacchetti greetd, ReGreet, cage e cups verificati nel target")
+
+
+def _check_greeter_account(ctx) -> None:
+    """Verifica che utente e gruppo _greeter esistano già nel target."""
+    root = ctx.paths.root
+    uid = ctx.run(["chroot", root, "id", "-u", "_greeter"], check=False)
+    if _rc(uid) != 0:
+        raise ConfigurationError(
+            "Utente '_greeter' non presente nel target: necessario per avviare ReGreet. "
+            "L'installer non crea l'account automaticamente."
+        )
+    group = ctx.run(["chroot", root, "getent", "group", "_greeter"], check=False)
+    if _rc(group) != 0:
+        raise ConfigurationError(
+            "Gruppo '_greeter' non presente nel target: necessario per avviare ReGreet. "
+            "L'installer non crea l'account automaticamente."
+        )
+    ctx.ui.log("INFO", "Utente e gruppo _greeter verificati nel target")
+
+
 def _copy_installer_log(ctx) -> None:
     """Copia il log nel sistema installato, come nella worker storica."""
     source = getattr(ctx, "install_log_path", None)
@@ -705,6 +739,8 @@ class ConfigureSystemJob(Job):
         # M2: prima di qualsiasi altra configurazione, neutralizza le
         # direttive dracut appartenenti alla live.
         _neutralize_dracut_live(ctx)
+        _check_target_display_packages(ctx)
+        _check_greeter_account(ctx)
 
         root = ctx.paths.root
         options = ctx.options
@@ -972,8 +1008,26 @@ class ConfigureSystemJob(Job):
             check=False,
         )
 
-        # NOTA: oltre alla pulizia di agetty-tty1 fatta sopra, non tocchiamo
-        # /etc/runit, /etc/sv o /var/service.
+        # Sul sistema installato il grafico e' gestito dal solo greetd+ReGreet.
+        # I quattro pacchetti sono già presenti nella rootfs copiata e sono
+        # stati verificati all'inizio di questa fase: nessuna installazione
+        # di rete viene eseguita sul sistema installato.
+        ctx.ui.log("INFO", "Pacchetti greetd, ReGreet, cage e cups già presenti nel target")
+
+        # Abilitiamo i servizi HyleOS e cupsd con lo stesso meccanismo usato
+        # per i servizi live in mkiso.sh. Il marker rende inerte l'hook di
+        # profile.d, evitando il doppio avvio della sessione grafica.
+        runsvdir_default = _p(ctx, "etc", "runit", "runsvdir", "default")
+        ctx.run(["mkdir", "-p", runsvdir_default], check=False)
+        for service in ("hyleos-greetd", "cupsd"):
+            ctx.run(
+                ["ln", "-sfn", "/etc/sv/" + service, os.path.join(runsvdir_default, service)]
+            )
+        greetd_marker = _p(ctx, "etc", "greetd", "enabled")
+        ctx.run(["mkdir", "-p", os.path.dirname(greetd_marker)], check=False)
+        _write(greetd_marker, "greetd\n")
+        ctx.ui.log("INFO", "Servizi hyleos-greetd e cupsd abilitati sul sistema installato")
+
         ctx.ui.log("INFO", f"Sostituzione riferimenti 'anon' con '{username}' nei file testuali")
         for root_dir in (_p(ctx, "etc", "profile.d"), _p(ctx, "usr", "bin")):
             if not ctx.exists(root_dir):

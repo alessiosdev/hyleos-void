@@ -141,7 +141,7 @@ Singleton {
 
     function getAppIcon(appId: string, desktopEntry: var): string {
         if (appId === "org.quickshell") {
-            return Qt.resolvedUrl("../assets/danklogo.svg");
+            return Qt.resolvedUrl("../assets/hyleos-logo.png");
         }
 
         const moddedId = moddedAppId(appId);

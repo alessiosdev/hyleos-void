@@ -14,6 +14,7 @@ import inspect
 import io
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,7 @@ sys.path.insert(0, HYLEOS)
 
 from installer.core import engine, jobs  # noqa: E402
 from installer.core.install_context import (  # noqa: E402
+    ConfigurationError,
     DiskValidationError,
     FstabError,
     InstallContext,
@@ -780,6 +782,238 @@ class LiveRuleCleanupTest(unittest.TestCase):
             source,
         )
         self.assertIn('ctx.run(["rm", "-f", path], check=False)', source)
+
+
+class LiveVsInstalledSessionTest(unittest.TestCase):
+    """Caratterizzazione della separazione live/installato prima del greetd."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="hyleos-session-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        self.getty_conf = os.path.join(self.root, "etc", "sv", "agetty-tty1", "conf")
+        os.makedirs(os.path.dirname(self.getty_conf), exist_ok=True)
+        with open(self.getty_conf, "w", encoding="utf-8") as fh:
+            fh.write("tty1::respawn:/sbin/agetty -a anon 38400 tty1 linux\n")
+        os.makedirs(os.path.join(self.root, "etc", "profile.d"), exist_ok=True)
+        os.makedirs(os.path.join(self.root, "etc", "dracut.conf.d"), exist_ok=True)
+
+    def configure_responses(self, overrides=None):
+        responses = {
+            ("chroot", self.root, "id", "-u", "tester"): FakeResult(stdout="1000\n"),
+            ("chroot", self.root, "id", "-nG", "tester"): FakeResult(stdout="wheel\n"),
+            ("chroot", self.root, "id", "-u", "_greeter"): FakeResult(),
+            ("chroot", self.root, "getent", "group", "_greeter"): FakeResult(),
+        }
+        for package in ("greetd", "ReGreet", "cage", "cups"):
+            responses[("xbps-query", "-r", self.root, package)] = FakeResult()
+        responses.update(overrides or {})
+        return responses
+
+    def configure_ctx(self, runner):
+        from installer.core.install_context import InstallOptions
+        ctx = make_ctx(self.root, runner=runner, exists=os.path.exists)
+        ctx.options = InstallOptions(
+            username="tester", fullname="Tester", password="secret",
+            hostname="hyleos", keymap="it", timezone="UTC", locale="it_IT.UTF-8",
+        )
+        return ctx
+
+    def run_configure(self, overrides=None):
+        runner = LocalFsRunner(self.root, responses=self.configure_responses(overrides))
+        jobs.ConfigureSystemJob().run(self.configure_ctx(runner))
+        return runner
+
+    def test_current_cleanup_removes_anon_and_tty1_autologin(self):
+        runner = self.run_configure()
+        self.assertIn(["chroot", self.root, "userdel", "-f", "-r", "anon"], runner.argv("chroot"))
+        with open(self.getty_conf, encoding="utf-8") as fh:
+            conf = fh.read()
+        self.assertNotIn("-a anon", conf)
+        self.assertNotIn("--autologin", conf)
+
+    def test_live_hook_keeps_tty1_autostart(self):
+        hook_path = os.path.join(
+            ROOT, "out", "rootfs-overlay", "etc", "profile.d", "hyleos-session.sh"
+        )
+        with open(hook_path, encoding="utf-8") as fh:
+            hook = fh.read()
+        self.assertIn('[ "$(tty)" = "/dev/tty1" ]', hook)
+        self.assertIn("/usr/bin/hyleos-session", hook)
+
+    def test_hyleos_greetd_and_cupsd_are_enabled_only_in_the_target(self):
+        runner = self.run_configure()
+        runsvdir = os.path.join(self.root, "etc", "runit", "runsvdir", "default")
+        for service in ("hyleos-greetd", "cupsd"):
+            self.assertIn(
+                ["ln", "-sfn", "/etc/sv/" + service, os.path.join(runsvdir, service)],
+                runner.argv("ln"),
+            )
+        self.assertNotIn(
+            ["ln", "-sfn", "/etc/sv/greetd", os.path.join(runsvdir, "greetd")],
+            runner.argv("ln"),
+        )
+        with open(os.path.join(self.root, "etc", "greetd", "enabled"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "greetd\n")
+        with open(os.path.join(ROOT, "build", "mkiso.sh"), encoding="utf-8") as fh:
+            mkiso_lines = fh.read().splitlines()
+        self.assertTrue(any("live.autologin" in line for line in mkiso_lines))
+        service_lines = [line for line in mkiso_lines if line.strip().startswith("for service in ")]
+        self.assertEqual(len(service_lines), 1)
+        self.assertNotIn("greetd", service_lines[0])
+        self.assertNotIn("cupsd", service_lines[0])
+        pkg_lines = [line for line in mkiso_lines if line.startswith("PKG_LIST=")]
+        self.assertEqual(len(pkg_lines), 1)
+        for package in ("greetd", "ReGreet", "cage", "cups"):
+            self.assertIn(package, pkg_lines[0].split())
+
+    def test_display_packages_are_verified_offline_without_installing(self):
+        runner = self.run_configure()
+        commands = [cmd for cmd, _kwargs in runner.commands]
+        for package in ("greetd", "ReGreet", "cage", "cups"):
+            self.assertIn(["xbps-query", "-r", self.root, package], commands)
+        self.assertFalse(runner.has("xbps-install"))
+        self.assertNotIn("xbps-install", inspect.getsource(jobs.ConfigureSystemJob._execute))
+        with open(os.path.join(ROOT, "build", "mkiso.sh"), encoding="utf-8") as fh:
+            mkiso_lines = fh.read().splitlines()
+        pkg_lines = [line for line in mkiso_lines if line.startswith("PKG_LIST=")]
+        self.assertEqual(len(pkg_lines), 1)
+        for package in ("greetd", "ReGreet", "cage", "cups"):
+            self.assertIn(package, pkg_lines[0].split())
+
+    def test_greeter_user_and_group_are_checked_in_the_target(self):
+        runner = self.run_configure()
+        commands = [cmd for cmd, _kwargs in runner.commands]
+        self.assertIn(["chroot", self.root, "id", "-u", "_greeter"], commands)
+        self.assertIn(["chroot", self.root, "getent", "group", "_greeter"], commands)
+        source = inspect.getsource(jobs._check_greeter_account)
+        self.assertNotIn("useradd", source)
+        self.assertNotIn("groupadd", source)
+
+    def test_no_autologin_survives_in_the_target(self):
+        self.run_configure()
+        for base, _dirs, files in os.walk(self.root):
+            for name in files:
+                path = os.path.join(base, name)
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    self.assertNotIn("--autologin", fh.read(), path)
+
+    def test_greeter_command_runs_regreet_under_cage(self):
+        config_path = os.path.join(
+            ROOT, "out", "rootfs-overlay", "etc", "greetd", "hyleos-config.toml"
+        )
+        with open(config_path, encoding="utf-8") as fh:
+            config = fh.read()
+        self.assertIn("[terminal]", config)
+        self.assertIn("vt = 7", config)
+        self.assertIn("[default_session]", config)
+        self.assertIn('user = "_greeter"', config)
+        self.assertIn('command = "dbus-run-session cage -s -mlast -d -- regreet"', config)
+        self.assertNotIn("plymouth quit", config)
+        self.assertNotIn("hyprland.lua", config)
+        self.assertNotIn("--autologin", config)
+        self.assertEqual(stat.S_IMODE(os.stat(config_path).st_mode), 0o644)
+
+    def test_legacy_greetd_paths_are_absent_from_overlay_and_target(self):
+        for parts in (
+            ("out", "rootfs-overlay", "etc", "sv", "greetd", "run"),
+            ("out", "rootfs-overlay", "etc", "greetd", "config.toml"),
+        ):
+            self.assertFalse(os.path.lexists(os.path.join(ROOT, *parts)))
+        self.run_configure()
+        for parts in (("etc", "sv", "greetd", "run"), ("etc", "greetd", "config.toml")):
+            self.assertFalse(os.path.lexists(os.path.join(self.root, *parts)))
+        source = inspect.getsource(jobs.ConfigureSystemJob._execute)
+        self.assertNotIn("/etc/sv/greetd", source)
+        self.assertNotIn("/etc/greetd/config.toml", source)
+
+    def test_plymouth_prelude_runs_as_root_before_greetd(self):
+        run_path = os.path.join(
+            ROOT, "out", "rootfs-overlay", "etc", "sv", "hyleos-greetd", "run"
+        )
+        with open(run_path, encoding="utf-8") as fh:
+            script = fh.read()
+        lines = script.splitlines()
+        self.assertEqual(lines[0], "#!/bin/sh")
+        expected = [
+            "sv check dbus >/dev/null || exit 1",
+            "if [ -e /var/service/elogind ]; then sv check elogind >/dev/null || exit 1; fi",
+            "install -d -m 0700 -o _greeter -g _greeter /var/lib/regreet /var/log/regreet",
+            "plymouth quit --retain-splash 2>/dev/null || true",
+            "exec greetd --config /etc/greetd/hyleos-config.toml",
+        ]
+        self.assertEqual(lines[1:], expected)
+        self.assertLess(lines.index(expected[3]), lines.index(expected[4]))
+        for token in ("sudo", "doas", "pkexec", "runuser", "setpriv", "su "):
+            self.assertNotIn(token, script)
+        self.assertEqual(stat.S_IMODE(os.stat(run_path).st_mode), 0o755)
+
+    def test_hyleos_session_desktop_is_available_to_regreet(self):
+        desktop_path = os.path.join(
+            ROOT, "out", "rootfs-overlay", "usr", "share", "wayland-sessions",
+            "hyleos.desktop",
+        )
+        self.assertTrue(os.path.isfile(desktop_path))
+        with open(desktop_path, encoding="utf-8") as fh:
+            desktop = fh.read()
+        for line in (
+            "Name=Hyle OS",
+            "Comment=",
+            "Exec=/usr/bin/hyleos-session",
+            "Type=Application",
+        ):
+            self.assertIn(line, desktop)
+        self.assertNotIn("--autologin", desktop)
+
+    def test_regreet_css_uses_material_you_palette(self):
+        css_path = os.path.join(
+            ROOT, "out", "rootfs-overlay", "etc", "greetd", "regreet.css"
+        )
+        with open(css_path, encoding="utf-8") as fh:
+            css = fh.read()
+        for color in ("#6750a4", "#d0bcff", "#f7f2fa"):
+            self.assertIn(color, css)
+
+    def test_missing_target_package_aborts_before_configuration(self):
+        for package in ("greetd", "ReGreet", "cage", "cups"):
+            with self.subTest(package=package):
+                response = {("xbps-query", "-r", self.root, package): FakeResult(rc=1)}
+                runner = LocalFsRunner(self.root, responses=self.configure_responses(response))
+                with self.assertRaises(ConfigurationError) as caught:
+                    jobs.ConfigureSystemJob().run(self.configure_ctx(runner))
+                self.assertIn(package, str(caught.exception))
+                self.assertIn("offline", str(caught.exception))
+                self.assertFalse(runner.has("xbps-install"))
+                self.assertFalse(os.path.exists(os.path.join(self.root, "etc", "hostname")))
+
+    def test_missing_greeter_account_aborts_before_configuration(self):
+        cases = (
+            (("chroot", self.root, "id", "-u", "_greeter"), "Utente"),
+            (("chroot", self.root, "getent", "group", "_greeter"), "Gruppo"),
+        )
+        for command, label in cases:
+            with self.subTest(command=command):
+                runner = LocalFsRunner(
+                    self.root, responses=self.configure_responses({command: FakeResult(rc=1)})
+                )
+                with self.assertRaises(ConfigurationError) as caught:
+                    jobs.ConfigureSystemJob().run(self.configure_ctx(runner))
+                self.assertIn(label, str(caught.exception))
+                self.assertIn("_greeter", str(caught.exception))
+                self.assertFalse(runner.has("xbps-install"))
+                self.assertFalse(os.path.exists(os.path.join(self.root, "etc", "hostname")))
+
+    def test_hook_is_not_duplicated_on_the_installed_system(self):
+        hook_path = os.path.join(
+            ROOT, "out", "rootfs-overlay", "etc", "profile.d", "hyleos-session.sh"
+        )
+        with open(hook_path, encoding="utf-8") as fh:
+            hook = fh.read()
+        self.assertIn("-f /etc/greetd/enabled", hook)
+        self.assertIn('${WAYLAND_DISPLAY:-}', hook)
+        self.assertIn('${XDG_SESSION_TYPE:-}', hook)
+        self.assertEqual(hook.count("/usr/bin/hyleos-session\n"), 1)
+        self.assertLess(hook.index("/etc/greetd/enabled"), hook.index("/usr/bin/hyleos-session\n"))
 
 
 def ast_parse(func):

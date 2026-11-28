@@ -24,6 +24,18 @@ OUTPUT_ISO="${HYLEOS_OUTPUT_ISO:-$ROOT_DIR/out/hyleos-1.0-beta-x86_64.iso}"
 # rootfs direttamente in squashfs senza immagine ext3 intermedia).
 # Per la massima compressione (piu' lenta), esporta HYLEOS_FAST=0.
 FAST_BUILD="${HYLEOS_FAST:-1}"
+# Livello zstd del squashfs: default 1 (build rapida, invariato). Intero
+# ammesso 1..22 (limite superiore zstd). Per una release piu' compatta esporta
+# HYLEOS_ZSTD_LEVEL=15. HYLEOS_FAST resta il toggle della modalita' rapida: un
+# livello esplicito si applica anche con HYLEOS_FAST=0.
+SQUASHFS_ZSTD_LEVEL="${HYLEOS_ZSTD_LEVEL:-1}"
+case "$SQUASHFS_ZSTD_LEVEL" in
+    ''|*[!0-9]*) echo "ERRORE: HYLEOS_ZSTD_LEVEL deve essere un intero 1..22." >&2; exit 1 ;;
+esac
+if [ "$SQUASHFS_ZSTD_LEVEL" -lt 1 ] || [ "$SQUASHFS_ZSTD_LEVEL" -gt 22 ]; then
+    echo "ERRORE: HYLEOS_ZSTD_LEVEL deve essere un intero 1..22." >&2
+    exit 1
+fi
 # Squashfs diretto (senza rootfs.img ext3). Metti HYLEOS_DIRECT_SQUASHFS=0 per
 # tornare al layout classico se servisse una ISO di emergenza.
 DIRECT_SQUASHFS="${HYLEOS_DIRECT_SQUASHFS:-1}"
@@ -126,20 +138,23 @@ sed -i 's/--add-drivers "ahci" --force-add "vmklive autoinstaller"/--add-drivers
 # dmsquash-live (dracut) usa un squashfs contenente /usr come root inferiore in
 # overlayfs. Evitiamo cosi' l'immagine ext3 da 2x rootfs e il doppio I/O che
 # rendeva la fase di squashfs la piu' lenta della build.
-if [ "$FAST_BUILD" = "1" ]; then
-    sed -i 's|-comp "${SQUASHFS_COMPRESSION}"|-comp "${SQUASHFS_COMPRESSION}" -Xcompression-level 1|' "$MKLIVE_DIR/mklive.sh"
-    if ! grep -q -- '-Xcompression-level 1' "$MKLIVE_DIR/mklive.sh"; then
+# Il livello resta 1 di default; HYLEOS_ZSTD_LEVEL lo rende configurabile senza
+# modificare HYLEOS_FAST. Con HYLEOS_FAST=0 e nessun livello esplicito il
+# comportamento precedente resta invariato.
+if [ "$FAST_BUILD" = "1" ] || [ -n "${HYLEOS_ZSTD_LEVEL+x}" ]; then
+    sed -i "s|-comp \"\${SQUASHFS_COMPRESSION}\"|-comp \"\${SQUASHFS_COMPRESSION}\" -Xcompression-level $SQUASHFS_ZSTD_LEVEL|" "$MKLIVE_DIR/mklive.sh"
+    if ! grep -q -- "-Xcompression-level $SQUASHFS_ZSTD_LEVEL" "$MKLIVE_DIR/mklive.sh"; then
         echo "ERRORE: patch compressione squashfs non applicata." >&2
         exit 1
     fi
-    if [ "$DIRECT_SQUASHFS" = "1" ]; then
-        sed -i '/^    # Find out required size for the rootfs/,/^    umount -f "\$BUILDDIR\/tmp-rootfs"$/d' "$MKLIVE_DIR/mklive.sh"
-        sed -i '/mksquashfs/ s|"\$BUILDDIR/tmp"|"\$ROOTFS"|' "$MKLIVE_DIR/mklive.sh"
-        sed -i 's|rm -rf "\$ROOTFS" "\$BUILDDIR/tmp-rootfs" "\$BUILDDIR/tmp"|rm -rf "$ROOTFS"|' "$MKLIVE_DIR/mklive.sh"
-        if ! grep -q 'mksquashfs "$ROOTFS" "$IMAGEDIR/LiveOS/squashfs.img"' "$MKLIVE_DIR/mklive.sh"; then
-            echo "ERRORE: patch squashfs diretto non applicata." >&2
-            exit 1
-        fi
+fi
+if [ "$FAST_BUILD" = "1" ] && [ "$DIRECT_SQUASHFS" = "1" ]; then
+    sed -i '/^    # Find out required size for the rootfs/,/^    umount -f "\$BUILDDIR\/tmp-rootfs"$/d' "$MKLIVE_DIR/mklive.sh"
+    sed -i '/mksquashfs/ s|"\$BUILDDIR/tmp"|"\$ROOTFS"|' "$MKLIVE_DIR/mklive.sh"
+    sed -i 's|rm -rf "\$ROOTFS" "\$BUILDDIR/tmp-rootfs" "\$BUILDDIR/tmp"|rm -rf "$ROOTFS"|' "$MKLIVE_DIR/mklive.sh"
+    if ! grep -q 'mksquashfs "$ROOTFS" "$IMAGEDIR/LiveOS/squashfs.img"' "$MKLIVE_DIR/mklive.sh"; then
+        echo "ERRORE: patch squashfs diretto non applicata." >&2
+        exit 1
     fi
 fi
 
@@ -158,7 +173,12 @@ if [ ! -x "$INTEGRITY_HELPER" ]; then
     echo "ERRORE: manca l'helper eseguibile $INTEGRITY_HELPER." >&2
     exit 1
 fi
-if [ "$DIRECT_SQUASHFS" = "1" ]; then
+# L'anchor deve seguire il layout effettivamente prodotto: la patch del
+# squashfs diretto (patch 3b) scatta solo con FAST_BUILD=1. Con HYLEOS_FAST=0
+# mklive.sh conserva mksquashfs su "$BUILDDIR/tmp" anche se
+# HYLEOS_DIRECT_SQUASHFS=1: cercare l'anchor "$ROOTFS" fallirebbe senza che la
+# patch diretta sia stata applicata. Il default (FAST=1, DIRECT=1) resta invariato.
+if [ "$FAST_BUILD" = "1" ] && [ "$DIRECT_SQUASHFS" = "1" ]; then
     _sq_src='$ROOTFS'
     _sq_anchor='mksquashfs "$ROOTFS" "$IMAGEDIR/LiveOS/squashfs.img"'
 else
@@ -322,17 +342,22 @@ cd "$MKLIVE_DIR"
 # gptfdisk (sgdisk) e psmisc (fuser) sono richiesti dal preflight
 # dell'installer: vanno inclusi esplicitamente perché non fanno parte di
 # base-system e senza di loro l'installer si blocca all'avvio.
-PKG_LIST="hyprland hyprland-guiutils xdg-desktop-portal-hyprland xdg-desktop-portal-gtk quickshell polkit-gnome kitty grim slurp wl-clipboard gtk+3 gtk4 libadwaita adwaita-icon-theme NetworkManager wpa_supplicant pipewire alsa-pipewire wireplumber dbus elogind seatd fuse polkit python3 python3-gobject python3-requests mesa-dri vulkan-loader mesa-vulkan-intel mesa-vulkan-radeon linux-firmware linux-firmware-amd linux-firmware-intel sudo accountsservice power-profiles-daemon cups-pk-helper matugen cava plymouth plymouth-data efibootmgr dosfstools parted gptfdisk psmisc rsync grub-x86_64-efi libdisplay-info brightnessctl dejavu-fonts-ttf noto-fonts-ttf noto-fonts-emoji font-material-design-icons-ttf nerd-fonts-symbols-ttf swaybg wlr-randr nautilus firefox gvfs gvfs-mtp gvfs-smb udisks2 upower bluez fastfetch inxi pciutils usbutils dmidecode ethtool pavucontrol xdg-user-dirs zramen libnotify xsettingsd"
+# Il set sistema (ADR-0045) e' dichiarato anche nei template hyleos-base e
+# hyleos-desktop, cosi' la ISO resta completa anche senza repository HyleOS.
+# ADR-0051: greetd, ReGreet, cage e cups sono in PKG_LIST per l'installazione
+# offline del target; il servizio hyleos-greetd NON e' abilitato nella live,
+# che resta con live.autologin e l'utente anon.
+PKG_LIST="hyprland hyprland-guiutils xdg-desktop-portal-hyprland xdg-desktop-portal-gtk quickshell polkit-gnome kitty grim slurp wl-clipboard gtk+3 gtk4 libadwaita adwaita-icon-theme NetworkManager wpa_supplicant pipewire alsa-pipewire wireplumber dbus elogind seatd fuse polkit python3 python3-gobject python3-requests mesa-dri mesa-vaapi intel-media-driver vulkan-loader mesa-vulkan-intel mesa-vulkan-radeon linux-firmware linux-firmware-amd linux-firmware-intel sof-firmware intel-ucode sudo accountsservice power-profiles-daemon cups greetd ReGreet cage cups-pk-helper matugen cava plymouth plymouth-data efibootmgr dosfstools exfatprogs ntfs-3g parted gptfdisk psmisc rsync grub-x86_64-efi libdisplay-info brightnessctl dejavu-fonts-ttf noto-fonts-ttf noto-fonts-emoji font-material-design-icons-ttf nerd-fonts-symbols-ttf swaybg wlr-randr nautilus firefox gvfs gvfs-mtp gvfs-smb udisks2 upower bluez fastfetch inxi pciutils usbutils dmidecode ethtool pavucontrol xdg-user-dirs zramen libnotify xsettingsd void-repo-nonfree"
 [ -n "$HYLEOS_REPO_PKGS" ] && PKG_LIST="$PKG_LIST $HYLEOS_REPO_PKGS"
 
 MKLIVE_EXTRA_OPTS=()
 BOOT_EXTRA=""
 if [ "$FAST_BUILD" = "1" ]; then
     if [ "$DIRECT_SQUASHFS" = "1" ]; then
-        echo "[*] Modalita' FAST attiva: initramfs zstd, squashfs diretto zstd livello 1."
+        echo "[*] Modalita' FAST attiva: initramfs zstd, squashfs diretto zstd livello $SQUASHFS_ZSTD_LEVEL."
         BOOT_EXTRA="rd.overlay=1 rd.live.overlay.overlayfs=1"
     else
-        echo "[*] Modalita' FAST attiva con rootfs.img ext3: initramfs zstd, squashfs zstd livello 1."
+        echo "[*] Modalita' FAST attiva con rootfs.img ext3: initramfs zstd, squashfs zstd livello $SQUASHFS_ZSTD_LEVEL."
     fi
     PKG_LIST="$PKG_LIST zstd"
     MKLIVE_EXTRA_OPTS=(-i zstd)

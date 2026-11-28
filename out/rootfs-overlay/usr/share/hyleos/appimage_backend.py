@@ -538,11 +538,13 @@ def _icon_size_and_ext(path):
     ext = os.path.splitext(path)[1].lower()
     if ext not in ICON_EXTS:
         ext = ".png"
-    match = re.search(r"(?<!\d)(\d{1,4})[xX](\d{1,4})(?!\d)", path)
-    if match and match.group(1) == match.group(2):
-        size = int(match.group(1))
-        if size in ICON_SIZES:
-            return size, ext
+    for match in re.finditer(
+        r"(?<!\d)(\d{1,4})[xX](\d{1,4})(?!\d)", os.path.basename(path)
+    ):
+        if match.group(1) == match.group(2):
+            size = int(match.group(1))
+            if size in ICON_SIZES:
+                return size, ext
     return 256, ext
 
 

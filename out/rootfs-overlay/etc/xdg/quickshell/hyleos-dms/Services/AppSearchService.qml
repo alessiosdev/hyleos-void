@@ -163,13 +163,13 @@ Singleton {
         });
     }
 
-    readonly property string dmsLogoPath: Qt.resolvedUrl("../assets/danklogo2.svg")
+    readonly property string hyleosLogoPath: Qt.resolvedUrl("../assets/hyleos-logo.png")
 
     readonly property var builtInPlugins: ({
             "dms_settings": {
                 id: "dms_settings",
                 name: I18n.tr("Settings", "settings window title"),
-                icon: "svg+corner:" + dmsLogoPath + "|settings",
+                icon: "svg+corner:" + hyleosLogoPath + "|settings",
                 cornerIcon: "settings",
                 comment: "DMS",
                 action: "ipc:settings",
@@ -180,7 +180,7 @@ Singleton {
             "dms_notepad": {
                 id: "dms_notepad",
                 name: I18n.tr("Notepad", "Notepad"),
-                icon: "svg+corner:" + dmsLogoPath + "|description",
+                icon: "svg+corner:" + hyleosLogoPath + "|description",
                 cornerIcon: "description",
                 comment: "DMS",
                 action: "ipc:notepad",
@@ -191,7 +191,7 @@ Singleton {
             "dms_sysmon": {
                 id: "dms_sysmon",
                 name: I18n.tr("System Monitor", "sysmon window title"),
-                icon: "svg+corner:" + dmsLogoPath + "|monitor_heart",
+                icon: "svg+corner:" + hyleosLogoPath + "|monitor_heart",
                 cornerIcon: "monitor_heart",
                 comment: "DMS",
                 action: "ipc:processlist",
@@ -202,7 +202,7 @@ Singleton {
             "dms_colorpicker": {
                 id: "dms_colorpicker",
                 name: I18n.tr("Color Picker"),
-                icon: "svg+corner:" + dmsLogoPath + "|palette",
+                icon: "svg+corner:" + hyleosLogoPath + "|palette",
                 cornerIcon: "palette",
                 comment: "DMS",
                 action: "ipc:color-picker",
@@ -224,7 +224,7 @@ Singleton {
             "dms_qr_generator": {
                 id: "dms_qr_generator",
                 name: I18n.tr("QR Generator"),
-                icon: "svg+corner:" + dmsLogoPath + "|qr_code",
+                icon: "svg+corner:" + hyleosLogoPath + "|qr_code",
                 cornerIcon: "qr_code",
                 comment: "DMS",
                 action: "ipc:qr-generator",

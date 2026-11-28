@@ -542,6 +542,27 @@ IPC DMS: `dms ipc call windowmode get|set|toggle|reload`.
 11. `./build/e2e-installer.sh` + `./build/verify-installed-system.sh`.
 12. Test su SSD reale, poi release.
 
+Per una release piu' compatta usare `HYLEOS_ZSTD_LEVEL=15 ./build/mkiso.sh`:
+il livello passa a `-Xcompression-level`; il default resta 1 e `HYLEOS_FAST`
+continua a governare la modalita' rapida. Firmware, VA-API, filesystem
+Windows/USB, `cups` e `void-repo-nonfree` sono dichiarati nei template
+`hyleos-base`/`hyleos-desktop` e in `PKG_LIST`; `cupsd` va abilitato solo sul
+sistema installato.
+
+`greetd`, `ReGreet`, `cage` e `cups` sono ora in `PKG_LIST` per l'installazione
+**offline** del sistema installato (ADR-0051): `cups` era già presente, e
+`cupsd` va abilitato solo sul target. Il servizio `hyleos-greetd` NON è
+abilitato nella live, che resta con `live.autologin` e l'utente `anon`; la
+configurazione dedicata è `/etc/greetd/hyleos-config.toml`. Dimensioni dai
+repodata Void current (`installati / download`): `greetd-0.10.3_2` =
+**1674 KB / 459 KB**, `ReGreet-0.5.0_3` = **8663 KB / 2360 KB**,
+`cage-0.3.0_1` = **65 KB / 24 KB**, `cups-2.4.20_1` = **13 MB / 5433 KB**
+(fonte `/var/db/xbps/https___repo-default_voidlinux_org_current/x86_64-repodata`).
+I tre pacchetti aggiunti pesano insieme **~10,4 MB installati**; `cups` è già
+conteggiato nella ISO preesistente. Le dipendenze transitive di `cage`
+(wayland, wlroots, Xwayland) NON sono quantificate: il peso finale della ISO
+va verificato dopo il rebuild.
+
 ---
 
 ## 13. Cosa manca in questo ambiente di sviluppo

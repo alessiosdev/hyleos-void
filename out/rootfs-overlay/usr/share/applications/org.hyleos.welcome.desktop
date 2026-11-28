@@ -2,7 +2,7 @@
 Name=Benvenuto in Hyle OS
 Comment=Guida iniziale, scorciatoie e strumenti per Hyle OS
 Exec=/usr/bin/hyle-welcome
-Icon=hyleos-logo
+Icon=hyle-welcome
 Terminal=false
 Type=Application
 Categories=Utility;System;

@@ -2,7 +2,7 @@
 Name=Hyle Store
 Comment=Centro software e applicazioni per Hyle OS
 Exec=python3 /usr/share/hyleos/appstore.py
-Icon=hyleos-logo
+Icon=hyleos-store
 Terminal=false
 Type=Application
 Categories=System;Settings;PackageManager;

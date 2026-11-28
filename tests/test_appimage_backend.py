@@ -341,6 +341,52 @@ class AppImageBackendTest(unittest.TestCase):
             ]
             self.assertEqual(leftovers, [])
 
+    def test_icon_size_and_ext_ignores_size_like_path_components(self):
+        for component in ("hg9dl3x7", "9x1uwlyz"):
+            with self.subTest(component=component):
+                path = os.path.join(self.tmp.name, component, "obsidian-128x128.png")
+                self.assertEqual(self.mod._icon_size_and_ext(path), (128, ".png"))
+        mixed = os.path.join(self.tmp.name, "hg9dl3x7", "app-3x7-128x128.png")
+        self.assertEqual(self.mod._icon_size_and_ext(mixed), (128, ".png"))
+        valid = os.path.join(self.tmp.name, "hg9dl3x7", "app-256x256.png")
+        self.assertEqual(self.mod._icon_size_and_ext(valid), (256, ".png"))
+
+    def test_reinstall_replaces_assets_with_size_like_temp_path_component(self):
+        weird_home = os.path.join(self.tmp.name, "hg9dl3x7", "home")
+        os.makedirs(weird_home, exist_ok=True)
+        os.environ["HOME"] = weird_home
+
+        first = self.mod.install(self.entry)
+        with open(self.mod.manifest_path(), encoding="utf-8") as handle:
+            old_files = list(json.load(handle)["apps"]["obsidian"]["files"])
+        old_icon = next(path for path in old_files if "/256/apps/" in path)
+        self.assertTrue(os.path.isfile(old_icon))
+
+        new_payload = b"fake AppImage payload v2 con componente 3x7 nel path\n"
+        self.payload = new_payload
+
+        def _fake_extract_v2(appimage, workdir):
+            root = os.path.join(workdir, "squashfs-root")
+            os.makedirs(root, exist_ok=True)
+            with open(os.path.join(root, "obsidian-v2.desktop"), "w", encoding="utf-8") as handle:
+                handle.write("[Desktop Entry]\nName=Obsidian v2\n")
+            with open(os.path.join(root, "obsidian-128x128.png"), "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\nicona-128")
+            return root
+
+        self.mod._extract_appimage = _fake_extract_v2
+        entry_v2 = dict(
+            self.entry,
+            version="2.0",
+            sha256=hashlib.sha256(new_payload).hexdigest(),
+        )
+        second = self.mod.install(entry_v2)
+
+        self.assertEqual(second, first)
+        self.assertFalse(os.path.exists(old_icon))
+        new_icon = os.path.join(self.mod.icons_dir(), "128", "apps", "obsidian.png")
+        self.assertTrue(os.path.isfile(new_icon))
+
     def test_reinstall_failure_rolls_back_binary(self):
         first = self.mod.install(self.entry)
         with open(first, "rb") as handle:

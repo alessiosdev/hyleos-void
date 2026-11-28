@@ -49,7 +49,7 @@ Item {
         smooth: true
         mipmap: true
         asynchronous: true
-        source: "file://" + Theme.shellDir + "/assets/danklogonormal.svg"
+        source: "file://" + Theme.shellDir + "/assets/hyleos-logo.png"
         opacity: 0.25
         visible: !isColorWallpaper
         layer.enabled: true

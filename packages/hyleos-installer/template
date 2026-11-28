@@ -1,7 +1,7 @@
 # Ricetta xbps-src — hyleos-installer
 pkgname=hyleos-installer
 version=1.0.0
-revision=6
+revision=9
 short_desc="HyleOS - installer grafico (GTK4) per UEFI x86_64"
 maintainer="Hyle OS Team"
 license="MIT"
